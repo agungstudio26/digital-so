@@ -1,18 +1,19 @@
 import streamlit as st
 import pandas as pd
-from supabase import create_client, Client
+from supabase import create_client
 from datetime import datetime
 import time
 
-# --- KONFIGURASI SUPABASE ---
-# Disarankan simpan ini di st.secrets untuk production
-# Untuk demo, user bisa mengganti string kosong di bawah
+# --- KONFIGURASI ---
+# Ganti dengan kredensial Anda atau gunakan st.secrets
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 
-# Cek koneksi
-if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("⚠️ Konfigurasi Database Belum Ada. Masukkan SUPABASE_URL dan SUPABASE_KEY di .streamlit/secrets.toml atau di kode.")
+# Daftar Nama Sales (Bisa diedit manual di sini sesuai tim toko)
+DAFTAR_SALES = ["Budi", "Siti", "Anto", "Dewi", "Reza", "Supervisor"]
+
+if not SUPABASE_URL:
+    st.error("⚠️ Database belum dikonfigurasi.")
     st.stop()
 
 @st.cache_resource
@@ -21,329 +22,212 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- FUNGSI HELPER ---
+# --- FUNGSI ---
 
-def get_data(lokasi=None, jenis=None):
-    """Mengambil data dari Supabase dengan filter"""
+def get_data(lokasi=None, jenis=None, search_term=None):
     query = supabase.table("stock_opname").select("*")
+    if lokasi: query = query.eq("lokasi", lokasi)
+    if jenis: query = query.eq("jenis", jenis)
     
-    if lokasi:
-        query = query.eq("lokasi", lokasi)
-    if jenis:
-        query = query.eq("jenis", jenis)
-    
-    # Order by nama barang agar rapi
+    # Ambil data lalu filter search di pandas (lebih fleksibel untuk search text partial)
     response = query.order("nama_barang").execute()
-    return pd.DataFrame(response.data)
+    df = pd.DataFrame(response.data)
+    
+    if not df.empty and search_term:
+        # Filter pencarian (case insensitive)
+        df = df[df['nama_barang'].str.contains(search_term, case=False, na=False) | 
+                df['sku'].str.contains(search_term, case=False, na=False)]
+    
+    return df
 
-def update_stock(id_barang, qty_fisik):
-    """Update jumlah fisik ke database"""
+def update_stock(id_barang, qty_fisik, nama_sales):
     now = datetime.utcnow().isoformat()
     supabase.table("stock_opname").update({
         "fisik_qty": qty_fisik, 
-        "updated_at": now
+        "updated_at": now,
+        "updated_by": nama_sales # Mencatat siapa yang update
     }).eq("id", id_barang).execute()
 
-def reset_and_upload_master(df):
-    """Menghapus data lama dan upload data baru dari Excel"""
+def reset_and_upload(df):
     try:
-        # 1. Hapus semua data lama
-        # Supabase delete all rows trick: delete where id > 0
         supabase.table("stock_opname").delete().gt("id", 0).execute()
-        
-        # 2. Siapkan data baru
         data_to_insert = []
         for _, row in df.iterrows():
-            # Logika deteksi SN vs Non-SN
-            # Jika kolom Serial Number ada isinya, maka Kategori = SN
             is_sn = pd.notna(row.get('Serial Number')) and str(row.get('Serial Number')).strip() != ''
-            kategori = 'SN' if is_sn else 'NON-SN'
-            
-            # Sanitasi nilai NaN menjadi 0 atau string kosong
-            sn_val = str(row.get('Serial Number')) if is_sn else None
-            qty_system = int(row.get('Quantity', 0))
-            
-            # Jika SN, biasanya qty system per baris adalah 1. Jika Non-SN, bisa banyak.
-            
             item = {
                 "sku": str(row.get('Internal Reference', '')),
                 "nama_barang": row.get('Product', 'Unknown'),
-                "serial_number": sn_val,
-                "kategori_barang": kategori,
-                "lokasi": row.get('LOKASI'), # Wajib ada di Excel
-                "jenis": row.get('JENIS'),   # Wajib ada di Excel
-                "system_qty": qty_system,
-                "fisik_qty": 0 # Default mulai dari 0
+                "serial_number": str(row.get('Serial Number')) if is_sn else None,
+                "kategori_barang": 'SN' if is_sn else 'NON-SN',
+                "lokasi": row.get('LOKASI'),
+                "jenis": row.get('JENIS'),
+                "system_qty": int(row.get('Quantity', 0)),
+                "fisik_qty": 0,
+                "updated_by": "-" # Default strip
             }
             data_to_insert.append(item)
         
-        # 3. Bulk Insert (Batching jika data > 1000 baris untuk keamanan)
-        batch_size = 500
-        for i in range(0, len(data_to_insert), batch_size):
-            batch = data_to_insert[i:i + batch_size]
-            supabase.table("stock_opname").insert(batch).execute()
-            
+        # Batch insert
+        for i in range(0, len(data_to_insert), 500):
+            supabase.table("stock_opname").insert(data_to_insert[i:i+500]).execute()
         return True, len(data_to_insert)
     except Exception as e:
         return False, str(e)
-
-# --- HALAMAN ADMIN ---
-def page_admin():
-    st.title("🛡️ Admin Dashboard")
-    st.markdown("Upload Master Data dari Odoo dan Pantau Progres.")
-
-    tab1, tab2 = st.tabs(["📤 Upload Master Data", "📊 Laporan & Progres"])
-
-    with tab1:
-        st.warning("⚠️ **PERHATIAN:** Upload file baru akan MENGHAPUS seluruh data Stock Opname yang sedang berjalan!")
-        
-        uploaded_file = st.file_uploader("Upload File Excel Odoo (.xlsx)", type=['xlsx'])
-        
-        if uploaded_file:
-            try:
-                df = pd.read_excel(uploaded_file)
-                
-                # Validasi Kolom Wajib
-                required_cols = ['LOKASI', 'JENIS', 'Product', 'Internal Reference', 'Quantity']
-                missing = [c for c in required_cols if c not in df.columns]
-                
-                if missing:
-                    st.error(f"Kolom wajib tidak ditemukan: {', '.join(missing)}")
-                    st.info("Pastikan Excel memiliki kolom: LOKASI, JENIS, Product, Internal Reference, Quantity, Serial Number (Opsional)")
-                else:
-                    st.dataframe(df.head())
-                    if st.button("🚀 Reset & Mulai Stock Opname Baru", type="primary"):
-                        with st.spinner("Sedang memproses database..."):
-                            success, msg = reset_and_upload_master(df)
-                            if success:
-                                st.success(f"Berhasil! {msg} baris data telah diupload. Sales sudah bisa mulai bekerja.")
-                            else:
-                                st.error(f"Gagal upload: {msg}")
-            except Exception as e:
-                st.error(f"Error membaca file: {e}")
-
-    with tab2:
-        if st.button("🔄 Refresh Data"):
-            st.rerun()
-            
-        # Ambil semua data
-        df_all = get_data()
-        
-        if df_all.empty:
-            st.info("Belum ada data.")
-            return
-
-        # Hitung Progres
-        # Barang dianggap 'checked' jika fisik_qty > 0 (asumsi kasar) atau user sudah visit
-        # Untuk presisi lebih baik, kita hitung progress match vs unmatch
-        
-        df_all['selisih'] = df_all['fisik_qty'] - df_all['system_qty']
-        df_all['status'] = df_all['selisih'].apply(lambda x: 'MATCH' if x == 0 else ('KURANG' if x < 0 else 'LEBIH'))
-        
-        match_count = len(df_all[df_all['status'] == 'MATCH'])
-        total_items = len(df_all)
-        progress = (match_count / total_items) * 100 if total_items > 0 else 0
-        
-        st.progress(progress / 100)
-        st.metric("Akurasi Data (Match)", f"{progress:.1f}%", f"{match_count}/{total_items} Items")
-        
-        st.subheader("⚠️ Laporan Selisih (Discrepancy)")
-        # Filter hanya yang selisih
-        df_selisih = df_all[df_all['selisih'] != 0].copy()
-        
-        if not df_selisih.empty:
-            st.error(f"Ditemukan {len(df_selisih)} item dengan selisih!")
-            
-            # Formatting untuk display
-            st.dataframe(
-                df_selisih[['sku', 'nama_barang', 'lokasi', 'jenis', 'system_qty', 'fisik_qty', 'selisih']],
-                use_container_width=True
-            )
-            
-            # Download Button
-            csv = df_selisih.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "📥 Download Laporan Selisih (CSV)",
-                csv,
-                "laporan_selisih_so.csv",
-                "text/csv",
-                key='download-csv'
-            )
-        else:
-            st.success("🎉 Sempurna! Belum ada selisih ditemukan.")
 
 # --- HALAMAN SALES ---
 def page_sales():
     st.title("📱 Validasi Stok")
     
-    # 1. Filter Area Kerja
-    col1, col2 = st.columns(2)
-    with col1:
-        lokasi_opt = st.selectbox("Pilih Lokasi", ["Floor", "Gudang"])
-    with col2:
-        jenis_opt = st.selectbox("Pilih Jenis", ["Stok", "Demo"])
+    # 1. Identitas & Filter (Header Sticky)
+    with st.container():
+        col_id, col_area = st.columns([1, 2])
+        with col_id:
+            # Dropdown Nama Sales (PENTING: Audit Trail)
+            nama_user = st.selectbox("👤 Nama Anda", DAFTAR_SALES, index=0)
+        with col_area:
+            c1, c2 = st.columns(2)
+            lokasi = c1.selectbox("Lokasi", ["Floor", "Gudang"])
+            jenis = c2.selectbox("Jenis", ["Stok", "Demo"])
     
-    # Tombol Refresh manual (kadang perlu jika koneksi lambat)
-    if st.button("🔄 Muat Data Area Ini"):
+    st.divider()
+    
+    # 2. Search Bar
+    search_txt = st.text_input("🔍 Cari Barang (Nama / SKU)", placeholder="Ketik Samsung, Kabel, atau SKU...")
+    
+    # Tombol Refresh
+    if st.button("🔄 Muat Data"):
         st.session_state['last_fetch'] = time.time()
-        
-    # Ambil Data
-    df = get_data(lokasi=lokasi_opt, jenis=jenis_opt)
-    
+
+    # Get Data
+    df = get_data(lokasi, jenis, search_txt)
+
     if df.empty:
-        st.info(f"Tidak ada data barang di **{lokasi_opt} - {jenis_opt}**.")
+        if search_txt:
+            st.warning(f"Barang '{search_txt}' tidak ditemukan di {lokasi} - {jenis}.")
+        else:
+            st.info("Data kosong.")
         return
 
-    st.markdown("---")
-    
-    # Pisahkan Barang SN dan Non-SN untuk UX yang lebih baik
+    # 3. Proses Validasi
+    # Pisahkan SN dan Non-SN
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
-    df_non_sn = df[df['kategori_barang'] == 'NON-SN'].copy()
+    df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
 
-    # --- BAGIAN 1: BARANG SERIAL NUMBER (CHECKLIST STYLE) ---
+    # --- TABEL SN ---
     if not df_sn.empty:
-        st.subheader(f"📋 Validasi Barang SN ({len(df_sn)} item)")
-        st.caption("Centang jika barang fisik ditemukan.")
-        
-        # Persiapkan data untuk Data Editor
-        # Kita ubah fisik_qty menjadi boolean (True/False) untuk checkbox
-        # Asumsi: Jika fisik_qty > 0 berarti TRUE (Found)
+        st.subheader(f"📋 Barang SN ({len(df_sn)})")
         df_sn['Ditemukan'] = df_sn['fisik_qty'] > 0
         
-        # Tampilkan kolom yang relevan saja
-        cols_show = ['id', 'nama_barang', 'serial_number', 'Ditemukan']
-        
         edited_sn = st.data_editor(
-            df_sn[cols_show],
+            df_sn[['id', 'nama_barang', 'serial_number', 'updated_by', 'Ditemukan']],
             column_config={
-                "Ditemukan": st.column_config.CheckboxColumn(
-                    "Ada Fisik?",
-                    help="Centang jika barang ada",
-                    default=False,
-                ),
-                "id": None, # Sembunyikan ID
-            },
-            disabled=["nama_barang", "serial_number"],
-            hide_index=True,
-            key="editor_sn",
-            use_container_width=True
-        )
-        
-        # Tombol Simpan Perubahan SN
-        if st.button("Simpan Validasi SN", type="primary"):
-            updates_count = 0
-            progress_bar = st.progress(0)
-            
-            # Bandingkan data lama vs baru untuk update yang berubah saja
-            # Tapi karena stateless, kita iterasi hasil editor
-            for index, row in edited_sn.iterrows():
-                original_row = df_sn[df_sn['id'] == row['id']].iloc[0]
-                original_checked = original_row['fisik_qty'] > 0
-                new_checked = row['Ditemukan']
-                
-                # Jika status berubah, update DB
-                if original_checked != new_checked:
-                    new_qty = 1 if new_checked else 0
-                    update_stock(row['id'], new_qty)
-                    updates_count += 1
-            
-            progress_bar.progress(100)
-            if updates_count > 0:
-                st.toast(f"✅ {updates_count} status SN berhasil disimpan!", icon="💾")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.info("Tidak ada perubahan data SN.")
-
-    # --- BAGIAN 2: BARANG NON-SN (INPUT ANGKA) ---
-    if not df_non_sn.empty:
-        st.markdown("---")
-        st.subheader(f"📦 Validasi Barang Non-SN ({len(df_non_sn)} item)")
-        st.caption("Masukkan jumlah fisik yang dihitung.")
-
-        # Indikator warna visual (Red/Green) sulit di dalam editor langsung, 
-        # jadi kita bantu user dengan kolom 'Selisih' yang computed
-        
-        cols_show_nonsn = ['id', 'nama_barang', 'sku', 'system_qty', 'fisik_qty']
-        
-        edited_nonsn = st.data_editor(
-            df_non_sn[cols_show_nonsn],
-            column_config={
-                "fisik_qty": st.column_config.NumberColumn(
-                    "Jml Fisik",
-                    help="Masukkan hitungan fisik",
-                    min_value=0,
-                    step=1,
-                    format="%d"
-                ),
-                "system_qty": st.column_config.NumberColumn(
-                    "Odoo Qty",
-                    help="Data Sistem",
-                    format="%d",
-                    disabled=True 
-                ),
+                "Ditemukan": st.column_config.CheckboxColumn("Ada?", default=False),
+                "updated_by": st.column_config.TextColumn("Dicek Oleh", disabled=True),
                 "id": None
             },
-            disabled=["nama_barang", "sku", "system_qty"],
-            hide_index=True,
-            key="editor_nonsn",
-            use_container_width=True
+            hide_index=True, use_container_width=True, key="sn_editor"
         )
-
-        # Logic Update Non-SN
-        if st.button("Simpan Hitungan Non-SN"):
-            updates_count = 0
-            for index, row in edited_nonsn.iterrows():
-                original_qty = df_non_sn[df_non_sn['id'] == row['id']].iloc[0]['fisik_qty']
-                new_qty = row['fisik_qty']
-                
-                if original_qty != new_qty:
-                    update_stock(row['id'], new_qty)
-                    updates_count += 1
-            
-            if updates_count > 0:
-                st.toast(f"✅ {updates_count} hitungan berhasil disimpan!", icon="💾")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.info("Tidak ada perubahan hitungan.")
-                
-        # Tampilkan Status Visual di bawah tabel edit agar user sadar
-        st.caption("Status Selisih (Realtime Preview):")
-        preview_df = edited_nonsn.copy()
-        preview_df['selisih'] = preview_df['fisik_qty'] - preview_df['system_qty']
         
-        def highlight_row(row):
-            if row['selisih'] == 0:
-                return ['background-color: #d4edda'] * len(row) # Green
-            else:
-                return ['background-color: #f8d7da'] * len(row) # Red
+        if st.button("Simpan SN", type="primary"):
+            n = 0
+            for i, row in edited_sn.iterrows():
+                # Logic: Cek apakah status berubah dari database asli
+                # (Simplified logic: always update if row exists in editor implies user intent)
+                # Untuk performa terbaik, kita idealnya bandingkan old vs new.
+                # Disini kita update jika True/False berubah
+                orig = df_sn[df_sn['id'] == row['id']].iloc[0]
+                if (orig['fisik_qty'] > 0) != row['Ditemukan']:
+                    update_stock(row['id'], 1 if row['Ditemukan'] else 0, nama_user)
+                    n += 1
+            if n > 0: st.success("Data SN Disimpan!"); time.sleep(0.5); st.rerun()
 
+    # --- TABEL NON-SN ---
+    if not df_non.empty:
+        st.subheader(f"📦 Barang Non-SN ({len(df_non)})")
+        
+        edited_non = st.data_editor(
+            df_non[['id', 'sku', 'nama_barang', 'system_qty', 'fisik_qty', 'updated_by']],
+            column_config={
+                "fisik_qty": st.column_config.NumberColumn("Fisik", min_value=0),
+                "updated_by": st.column_config.TextColumn("Dicek Oleh", disabled=True),
+                "system_qty": st.column_config.NumberColumn("Odoo", disabled=True),
+                "id": None
+            },
+            hide_index=True, use_container_width=True, key="non_editor"
+        )
+        
+        # Helper warna realtime
+        st.caption("Indikator: 🟩 Pas | 🟥 Selisih")
+        preview = edited_non.copy()
+        preview['selisih'] = preview['fisik_qty'] - preview['system_qty']
+        
+        # Tampilkan preview kecil berwarna
+        def color_row(val):
+            color = '#d4edda' if val == 0 else '#f8d7da'
+            return f'background-color: {color}'
+        
         st.dataframe(
-            preview_df[['nama_barang', 'system_qty', 'fisik_qty', 'selisih']].style.apply(highlight_row, axis=1),
-            use_container_width=True
+            preview[['nama_barang', 'selisih']].style.map(color_row, subset=['selisih']),
+            use_container_width=True, height=150
         )
 
-# --- MAIN APP ROUTING ---
+        if st.button("Simpan Non-SN", type="primary"):
+            n = 0
+            for i, row in edited_non.iterrows():
+                orig = df_non[df_non['id'] == row['id']].iloc[0]['fisik_qty']
+                if orig != row['fisik_qty']:
+                    update_stock(row['id'], row['fisik_qty'], nama_user)
+                    n += 1
+            if n > 0: st.success("Data Non-SN Disimpan!"); time.sleep(0.5); st.rerun()
+
+# --- HALAMAN ADMIN ---
+def page_admin():
+    st.title("🛡️ Admin Dashboard")
+    tab1, tab2 = st.tabs(["Upload", "Monitoring"])
+    
+    with tab1:
+        file = st.file_uploader("Upload Excel Odoo", type="xlsx")
+        if file and st.button("🚀 Reset & Upload Baru"):
+            df = pd.read_excel(file)
+            ok, msg = reset_and_upload(df)
+            if ok: st.success(f"Sukses! {msg} data masuk.")
+            else: st.error(f"Gagal: {msg}")
+
+    with tab2:
+        if st.button("Refresh"): st.rerun()
+        df = get_data()
+        if df.empty: return
+        
+        # KPI Ringkas
+        total = len(df)
+        # Dianggap 'dicek' jika updated_by bukan "-" (default strip)
+        dicek = len(df[df['updated_by'] != '-'])
+        selisih = df[df['fisik_qty'] != df['system_qty']]
+        
+        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi1.metric("Total Barang", total)
+        kpi2.metric("Sudah Dicek", f"{dicek} ({dicek/total*100:.1f}%)")
+        kpi3.metric("Item Selisih", len(selisih), delta_color="inverse")
+        
+        st.divider()
+        st.subheader("Detail Selisih & Checker")
+        st.dataframe(
+            df[['nama_barang', 'lokasi', 'system_qty', 'fisik_qty', 'updated_by']],
+            use_container_width=True
+        )
+        
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download Laporan Lengkap", csv, "laporan_so.csv", "text/csv")
+
+# --- MAIN ---
 def main():
-    st.set_page_config(page_title="Digital Stock Opname", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="Stock Opname", page_icon="📦", layout="wide")
+    menu = st.sidebar.radio("Menu", ["Sales", "Admin"])
     
-    st.sidebar.image("https://img.icons8.com/color/96/warehouse.png", width=80)
-    st.sidebar.title("Digital SO")
-    
-    menu = st.sidebar.radio("Menu", ["Sales (Validasi)", "Admin (Laporan & Upload)"])
-    
-    if menu == "Sales (Validasi)":
-        page_sales()
-    else:
-        # Simple Password check for Admin (Optional)
-        pwd = st.sidebar.text_input("Admin Password", type="password")
-        if pwd == "admin123": # Ganti dengan logic auth yang lebih aman
-            page_admin()
-        else:
-            if pwd:
-                st.sidebar.error("Password salah")
-            st.warning("Masukkan password admin di sidebar untuk akses menu ini.")
+    if menu == "Sales": page_sales()
+    elif menu == "Admin":
+        pwd = st.sidebar.text_input("Password", type="password")
+        if pwd == "admin123": page_admin()
 
 if __name__ == "__main__":
     main()
