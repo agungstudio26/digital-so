@@ -6,7 +6,7 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.7] ---
+# --- KONFIGURASI [v3.8] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -198,7 +198,10 @@ def page_sales():
     with st.container():
         col_id, col_area = st.columns([1, 2])
         with col_id:
-            nama_user = st.selectbox("👤 Nama Pemeriksa", DAFTAR_SALES)
+            # [v3.8] Placeholder Nama
+            opsi_sales = ["-- Silahkan Pilih Nama Petugas --"] + DAFTAR_SALES
+            nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales)
+        
         with col_area:
             st.write("---")
             owner_opt = st.radio("Sumber Barang:", ["Reguler (Milik Toko)", "Konsinyasi (Titipan)"], horizontal=True)
@@ -212,6 +215,12 @@ def page_sales():
             jenis = c2.selectbox("Jenis", opsi_jenis)
     
     st.divider()
+    
+    # [v3.8] Validasi Wajib Pilih Nama
+    if "Silahkan Pilih" in nama_user:
+        st.info("👋 Halo! Untuk memulai Stock Opname, mohon **pilih nama Anda** terlebih dahulu di menu kiri atas.")
+        st.stop()
+        
     search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...")
     
     if st.button("🔄 Refresh Data"):
@@ -278,7 +287,7 @@ def page_sales():
 
 # --- HALAMAN ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v3.7)")
+    st.title("🛡️ Admin Dashboard (v3.8)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -286,7 +295,6 @@ def page_admin():
     else:
         st.info(f"📅 Sesi Aktif: **{active_session}**")
     
-    # [v3.7] Tambah tab ke-4 untuk Danger Zone
     tab1, tab2, tab3, tab4 = st.tabs(["🚀 Master Data", "📥 Upload Offline", "🗄️ Laporan Akhir", "⚠️ Danger Zone"])
     
     with tab1:
@@ -385,7 +393,6 @@ def page_admin():
                     st.download_button("📥 Laporan KONSINYASI", convert_df_to_excel(df_cons), f"SO_Konsinyasi_{tgl}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 else: st.caption("Data Konsinyasi Kosong")
 
-    # [v3.7] Tab Khusus Danger Zone
     with tab4:
         st.header("⚠️ DANGER ZONE")
         st.error("Area Berbahaya. Tindakan di sini bersifat permanen.")
@@ -400,7 +407,6 @@ def page_admin():
         st.divider()
         st.subheader("🔥 Hapus Sesi Aktif")
         
-        # [Fix UI] Menggunakan 'with' column agar lebih rapi dan tombol sejajar
         dz_col1, dz_col2 = st.columns([3, 1]) 
         
         with dz_col1:
@@ -424,8 +430,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v3.7", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v3.7")
+    st.set_page_config(page_title="SO System v3.8", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v3.8")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
