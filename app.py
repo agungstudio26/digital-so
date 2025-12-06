@@ -6,7 +6,7 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.9] ---
+# --- KONFIGURASI [v3.9 - Fix] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -211,22 +211,25 @@ def page_sales():
     st.title(f"📱 SO: {session_name}")
     
     with st.container():
-        col_id, col_area = st.columns([1, 2])
-        with col_id:
+        # [v3.9 Fix] Mengatur ulang kolom input agar lebih sejajar
+        c_pemeriksa, c_owner, c_lokasi, c_jenis = st.columns([1, 1, 0.7, 0.7])
+
+        with c_pemeriksa:
             opsi_sales = ["-- Silahkan Pilih Nama Petugas --"] + DAFTAR_SALES
             nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales)
         
-        with col_area:
-            st.write("---")
-            owner_opt = st.radio("Sumber Barang:", ["Reguler (Milik Toko)", "Konsinyasi (Titipan)"], horizontal=True)
+        with c_owner:
+            st.caption("Sumber Barang:") # Menggunakan caption sebagai label atas
+            owner_opt = st.radio(" ", ["Reguler", "Konsinyasi"], horizontal=True, label_visibility="collapsed")
             owner_filter = "Reguler" if "Reguler" in owner_opt else "Konsinyasi"
-            st.write("---")
 
-            c1, c2 = st.columns(2)
-            lokasi = c1.selectbox("Lokasi", ["Floor", "Gudang"])
+        with c_lokasi:
+            lokasi = st.selectbox("Lokasi", ["Floor", "Gudang"])
+        
+        with c_jenis:
             opsi_jenis = ["Stok", "Demo"]
             if lokasi == "Gudang": opsi_jenis = ["Stok"]
-            jenis = c2.selectbox("Jenis", opsi_jenis)
+            jenis = st.selectbox("Jenis", opsi_jenis)
     
     st.divider()
     
@@ -473,13 +476,17 @@ def page_admin():
         st.divider()
         st.subheader("🔥 Hapus Sesi Aktif")
         
+        # [v3.9 Fix] Mengatur ulang kolom input agar lebih sejajar
         dz_col1, dz_col2 = st.columns([3, 1]) 
         
         with dz_col1:
             input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456")
+            # Trik spacer untuk meluruskan tombol dengan checkbox di bawah
+            st.write("") 
             confirm_reset = st.checkbox("Saya sadar data sesi ini akan hilang permanen.")
         
         with dz_col2:
+            # Trik spacer untuk meluruskan tombol dengan input box di atas
             st.text("") 
             st.write("") 
             if st.button("🔥 HAPUS SESI INI", use_container_width=True):
