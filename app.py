@@ -6,11 +6,11 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.6] ---
+# --- KONFIGURASI [v3.7] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
-RESET_PIN = "123456" # [v3.6] PIN untuk Reset Data
+RESET_PIN = "123456" # PIN Reset
 
 if not SUPABASE_URL:
     st.error("⚠️ Database belum dikonfigurasi. Cek secrets.toml")
@@ -81,11 +81,8 @@ def update_stock(id_barang, qty_fisik, nama_sales):
     }).eq("id", id_barang).execute()
 
 # --- FUNGSI ADMIN: PROSES DATA ---
-
-# [v3.6] Fungsi Hapus Sesi Aktif (Hard Reset)
 def delete_active_session():
     try:
-        # Hapus semua data yang is_active = True
         supabase.table("stock_opname").delete().eq("is_active", True).execute()
         return True, "Sesi aktif berhasil dihapus total."
     except Exception as e: return False, str(e)
@@ -281,7 +278,7 @@ def page_sales():
 
 # --- HALAMAN ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v3.6)")
+    st.title("🛡️ Admin Dashboard (v3.7)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -289,7 +286,8 @@ def page_admin():
     else:
         st.info(f"📅 Sesi Aktif: **{active_session}**")
     
-    tab1, tab2, tab3 = st.tabs(["🚀 Master Data", "📥 Upload Offline", "🗄️ Laporan Akhir"])
+    # [v3.7] Tambah tab ke-4 untuk Danger Zone
+    tab1, tab2, tab3, tab4 = st.tabs(["🚀 Master Data", "📥 Upload Offline", "🗄️ Laporan Akhir", "⚠️ Danger Zone"])
     
     with tab1:
         st.write("---")
@@ -331,27 +329,6 @@ def page_admin():
                         ok, msg = add_to_current_session(df_cons, active_session)
                         if ok: st.success(f"Berhasil menambahkan {msg} Data Konsinyasi ke sesi '{active_session}'."); time.sleep(2); st.rerun()
                         else: st.error(f"Gagal: {msg}")
-
-        # [v3.6] Danger Zone Reset
-        st.write("---")
-        with st.expander("⚠️ DANGER ZONE (Reset Sesi Aktif)"):
-            st.warning("Tindakan ini akan MENGHAPUS SEMUA DATA PADA SESI AKTIF SAAT INI. Gunakan jika salah upload file master dan ingin mengulang dari kosong tanpa membuat arsip.")
-            
-            dz_col1, dz_col2 = st.columns([2, 1])
-            input_pin = dz_col1.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456")
-            confirm_reset = dz_col1.checkbox("Saya sadar data sesi ini akan hilang permanen.")
-            
-            if dz_col2.button("🔥 HAPUS SESI INI"):
-                if input_pin == RESET_PIN:
-                    if confirm_reset:
-                        with st.spinner("Menghapus Sesi Aktif..."):
-                            ok, msg = delete_active_session()
-                            if ok: st.success("Sesi berhasil di-reset!"); time.sleep(2); st.rerun()
-                            else: st.error(f"Gagal: {msg}")
-                    else:
-                        st.error("Harap centang konfirmasi dulu.")
-                else:
-                    st.error("PIN Salah.")
 
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
@@ -408,10 +385,47 @@ def page_admin():
                     st.download_button("📥 Laporan KONSINYASI", convert_df_to_excel(df_cons), f"SO_Konsinyasi_{tgl}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 else: st.caption("Data Konsinyasi Kosong")
 
+    # [v3.7] Tab Khusus Danger Zone
+    with tab4:
+        st.header("⚠️ DANGER ZONE")
+        st.error("Area Berbahaya. Tindakan di sini bersifat permanen.")
+        
+        st.markdown("""
+        **Fungsi Reset Sesi Aktif:**
+        - Menghapus **SELURUH** data pada sesi yang sedang berjalan.
+        - Tidak membuat arsip/backup.
+        - Gunakan hanya jika Anda salah upload master data dan ingin memulai ulang dari nol.
+        """)
+        
+        st.divider()
+        st.subheader("🔥 Hapus Sesi Aktif")
+        
+        # [Fix UI] Menggunakan 'with' column agar lebih rapi dan tombol sejajar
+        dz_col1, dz_col2 = st.columns([3, 1]) 
+        
+        with dz_col1:
+            input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456")
+            confirm_reset = st.checkbox("Saya sadar data sesi ini akan hilang permanen.")
+        
+        with dz_col2:
+            st.text("") 
+            st.write("") 
+            if st.button("🔥 HAPUS SESI INI", use_container_width=True):
+                if input_pin == RESET_PIN:
+                    if confirm_reset:
+                        with st.spinner("Menghapus Sesi Aktif..."):
+                            ok, msg = delete_active_session()
+                            if ok: st.success("Sesi berhasil di-reset!"); time.sleep(2); st.rerun()
+                            else: st.error(f"Gagal: {msg}")
+                    else:
+                        st.error("Harap centang konfirmasi dulu.")
+                else:
+                    st.error("PIN Salah.")
+
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v3.6", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v3.6")
+    st.set_page_config(page_title="SO System v3.7", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v3.7")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
