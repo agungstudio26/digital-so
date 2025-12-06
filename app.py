@@ -147,20 +147,33 @@ def merge_offline_data(df):
     except Exception as e:
         return False, str(e)
 
+# [v3.2 Updated] Template Excel dengan Contoh Strategi "Search Brand"
 def get_template_excel():
     data = {
-        'Internal Reference': ['SKU-001'],
-        'Product': ['Contoh Barang'],
-        'Serial Number': [''],
-        'LOKASI': ['Floor'],
-        'JENIS': ['Stok'],
-        'Quantity': [10],
-        'Hitungan Fisik': [8]
+        'Internal Reference': ['SAM-S24-001', 'OPP-R8-002', 'ACC-CBL-001', 'ACC-CHG-002'],
+        'Product': [
+            'Samsung Galaxy S24 Ultra (Nama Brand Wajib di Depan)', 
+            'Oppo Reno 8 5G', 
+            'Vivan Kabel Data Type C', 
+            'Robot Charger Fast Charging'
+        ],
+        'Serial Number': ['SN12345678', 'SN87654321', '', ''],
+        'LOKASI': ['Floor', 'Floor', 'Gudang', 'Gudang'],
+        'JENIS': ['Stok', 'Stok', 'Stok', 'Stok'],
+        'Quantity': [10, 5, 100, 50],
+        'Hitungan Fisik': [10, 5, 98, 50] # Kolom untuk offline mode
     }
     df = pd.DataFrame(data)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Offline_Input')
+        df.to_excel(writer, index=False, sheet_name='Template_Master')
+        
+        # Auto width styling
+        worksheet = writer.sheets['Template_Master']
+        for column_cells in worksheet.columns:
+            length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
+            
     return output.getvalue()
 
 # --- HALAMAN SALES ---
@@ -178,7 +191,7 @@ def page_sales():
             jenis = c2.selectbox("Jenis", ["Stok", "Demo"])
     
     st.divider()
-    search_txt = st.text_input("🔍 Cari Barang (Nama/SKU)", placeholder="Ketik nama barang...")
+    search_txt = st.text_input("🔍 Cari Barang (Wajib Ketik Merek)", placeholder="Contoh: Samsung, Oppo, atau Kabel...")
     
     if st.button("🔄 Refresh"):
         st.session_state['last_fetch'] = time.time()
@@ -186,7 +199,10 @@ def page_sales():
     df = get_data(lokasi, jenis, search_txt, only_active=True)
 
     if df.empty:
-        st.info("Data tidak ditemukan atau belum ada Sesi Aktif.")
+        if search_txt:
+            st.warning(f"Barang '{search_txt}' tidak ditemukan di area ini. Pastikan filter Lokasi & Jenis benar.")
+        else:
+            st.info("ℹ️ Silakan ketik nama Merek/Barang di kolom pencarian di atas untuk memunculkan data.")
         return
 
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
@@ -267,12 +283,14 @@ def page_admin():
     
     with tab2:
         st.markdown("### Upload Susulan (Internet Mati)")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline.xlsx")
+        st.write("Gunakan template ini untuk Sales input offline. Kolom 'Product' sudah diberi contoh format 'Brand di Depan'.")
+        st.download_button("⬇️ Download Template Offline / Master", get_template_excel(), "Template_SO_Master.xlsx")
+        
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data"):
             with st.spinner("Merging..."):
                 df_off = pd.read_excel(file_offline)
-                if 'Hitungan Fisik' not in df_off.columns: st.error("Format salah!")
+                if 'Hitungan Fisik' not in df_off.columns: st.error("Format salah! Wajib ada kolom 'Hitungan Fisik'.")
                 else:
                     ok, count = merge_offline_data(df_off)
                     if ok: st.success(f"Berhasil update {count} data."); time.sleep(2); st.rerun()
@@ -309,11 +327,8 @@ def page_admin():
             
             st.subheader("📥 Download Backup Excel")
             
-            # Buat nama file dinamis dengan Tanggal
             tanggal_hari_ini = datetime.now().strftime("%Y-%m-%d")
             nama_file_excel = f"Laporan_SO_{tanggal_hari_ini}.xlsx"
-            
-            # Konversi ke Excel dengan Style Cantik [v3.2]
             excel_data = convert_df_to_excel(df)
             
             st.download_button(
