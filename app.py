@@ -6,7 +6,7 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.8] ---
+# --- KONFIGURASI [v3.9] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -56,6 +56,7 @@ def get_active_session_info():
         return "Belum Ada Sesi Aktif"
     except: return "-"
 
+# [v3.9] Tambahkan filter waktu untuk cek konflik
 def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=True, batch_id=None):
     query = supabase.table("stock_opname").select("*")
     if only_active: query = query.eq("is_active", True)
@@ -65,6 +66,8 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
     if jenis: query = query.eq("jenis", jenis)
     if owner: query = query.eq("owner_category", owner)
     
+    # Ambil data dan catat waktu pengambilan data
+    start_time = datetime.now()
     response = query.order("nama_barang").execute()
     df = pd.DataFrame(response.data)
     
@@ -72,13 +75,25 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
         df = df[df['nama_barang'].str.contains(search_term, case=False, na=False) | 
                 df['brand'].str.contains(search_term, case=False, na=False) |
                 df['sku'].str.contains(search_term, case=False, na=False)]
+    
+    # Simpan waktu pengambilan data di session state untuk konflik check
+    st.session_state['data_loaded_time'] = start_time
+    # Simpan dataframe asli di session state untuk perbandingan perubahan
+    st.session_state['current_df'] = df.copy()
+    
     return df
 
+def get_db_updated_at(id_barang):
+    """Fungsi helper untuk mengambil updated_at dari DB saat ini"""
+    res = supabase.table("stock_opname").select("updated_at, updated_by").eq("id", id_barang).single().execute()
+    return res.data['updated_at'], res.data['updated_by']
+
 def update_stock(id_barang, qty_fisik, nama_sales):
-    now = datetime.utcnow().isoformat()
-    supabase.table("stock_opname").update({
-        "fisik_qty": qty_fisik, "updated_at": now, "updated_by": nama_sales 
-    }).eq("id", id_barang).execute()
+    """
+    [v3.9] Fungsi update ini tidak lagi dipakai langsung. 
+    Logika update dan konflik check dipindahkan ke page_sales.
+    """
+    pass 
 
 # --- FUNGSI ADMIN: PROSES DATA ---
 def delete_active_session():
@@ -198,7 +213,6 @@ def page_sales():
     with st.container():
         col_id, col_area = st.columns([1, 2])
         with col_id:
-            # [v3.8] Placeholder Nama
             opsi_sales = ["-- Silahkan Pilih Nama Petugas --"] + DAFTAR_SALES
             nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales)
         
@@ -216,7 +230,6 @@ def page_sales():
     
     st.divider()
     
-    # [v3.8] Validasi Wajib Pilih Nama
     if "Silahkan Pilih" in nama_user:
         st.info("👋 Halo! Untuk memulai Stock Opname, mohon **pilih nama Anda** terlebih dahulu di menu kiri atas.")
         st.stop()
@@ -224,10 +237,14 @@ def page_sales():
     search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...")
     
     if st.button("🔄 Refresh Data"):
-        st.session_state['last_fetch'] = time.time()
+        st.cache_data.clear() # Clear cache data agar ambil data baru
+        st.session_state.pop('current_df', None)
+        st.rerun()
 
+    # Ambil data. Waktu dan data disimpan ke st.session_state['data_loaded_time'] dan ['current_df'] di dalam fungsi get_data
     df = get_data(lokasi, jenis, owner_filter, search_txt, only_active=True)
-
+    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1))
+    
     if df.empty:
         st.info(f"Tidak ada data barang **{owner_filter}** di {lokasi}-{jenis}.")
         return
@@ -235,6 +252,7 @@ def page_sales():
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
 
+    # --- TABEL SN ---
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)}) - {owner_filter}")
         df_sn['Ditemukan'] = df_sn['fisik_qty'] > 0
@@ -249,14 +267,41 @@ def page_sales():
             hide_index=True, use_container_width=True, key="sn"
         )
         if st.button("Simpan SN", type="primary"):
-            n = 0
+            updates_count = 0
+            conflict_found = False
+            
+            # [v3.9] Iterasi dan cek konflik sebelum save
             for i, row in edited_sn.iterrows():
-                orig = df_sn[df_sn['id'] == row['id']].iloc[0]
-                if (orig['fisik_qty'] > 0) != row['Ditemukan']:
-                    update_stock(row['id'], 1 if row['Ditemukan'] else 0, nama_user)
-                    n += 1
-            if n > 0: st.toast(f"✅ {n} SN Tersimpan!"); time.sleep(0.5); st.rerun()
+                # Dapatkan baris asli dari sesi state (yang kita punya saat loading)
+                original_row = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == row['id']].iloc[0]
+                
+                # Cek apakah user membuat perubahan pada item ini
+                original_checked = original_row['fisik_qty'] > 0
+                new_checked = row['Ditemukan']
+                
+                if original_checked != new_checked:
+                    # Perubahan terdeteksi, lakukan cek konflik!
+                    db_updated_at_str, updated_by_db = get_db_updated_at(row['id'])
+                    db_updated_at = datetime.fromisoformat(db_updated_at_str.replace('Z', '+00:00')) # Konversi ke datetime object
+                    
+                    if db_updated_at > loaded_time:
+                        # KONFLIK TERDETEKSI!
+                        st.error(f"⚠️ KONFLIK DATA di SN {row['serial_number']} ({row['nama_barang']})! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi input Anda.")
+                        conflict_found = True
+                        break # Stop proses simpan
+                    
+                    # Jika tidak ada konflik, lakukan update
+                    supabase.table("stock_opname").update({
+                        "fisik_qty": 1 if new_checked else 0, 
+                        "updated_at": datetime.utcnow().isoformat(), 
+                        "updated_by": nama_user
+                    }).eq("id", row['id']).execute()
+                    updates_count += 1
+            
+            if not conflict_found:
+                if updates_count > 0: st.toast(f"✅ {updates_count} SN Tersimpan!"); time.sleep(0.5); st.rerun()
 
+    # --- TABEL NON-SN ---
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)}) - {owner_filter}")
         edited_non = st.data_editor(
@@ -277,17 +322,38 @@ def page_sales():
         st.dataframe(preview[['nama_barang', 'selisih']].style.map(color_row, subset=['selisih']), use_container_width=True, height=150)
 
         if st.button("Simpan Non-SN", type="primary"):
-            n = 0
+            updates_count = 0
+            conflict_found = False
+
             for i, row in edited_non.iterrows():
-                orig = df_non[df_non['id'] == row['id']].iloc[0]['fisik_qty']
-                if orig != row['fisik_qty']:
-                    update_stock(row['id'], row['fisik_qty'], nama_user)
-                    n += 1
-            if n > 0: st.toast(f"✅ {n} Data Tersimpan!"); time.sleep(0.5); st.rerun()
+                original_row = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == row['id']].iloc[0]
+                
+                # Cek apakah user membuat perubahan pada item ini
+                if original_row['fisik_qty'] != row['fisik_qty']:
+                    # Perubahan terdeteksi, lakukan cek konflik!
+                    db_updated_at_str, updated_by_db = get_db_updated_at(row['id'])
+                    db_updated_at = datetime.fromisoformat(db_updated_at_str.replace('Z', '+00:00'))
+                    
+                    if db_updated_at > loaded_time:
+                        # KONFLIK TERDETEKSI!
+                        st.error(f"⚠️ KONFLIK DATA di {row['nama_barang']}! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi hitungan Anda.")
+                        conflict_found = True
+                        break 
+                        
+                    # Jika tidak ada konflik, lakukan update
+                    supabase.table("stock_opname").update({
+                        "fisik_qty": row['fisik_qty'], 
+                        "updated_at": datetime.utcnow().isoformat(), 
+                        "updated_by": nama_user
+                    }).eq("id", row['id']).execute()
+                    updates_count += 1
+
+            if not conflict_found:
+                if updates_count > 0: st.toast(f"✅ {updates_count} Data Tersimpan!"); time.sleep(0.5); st.rerun()
 
 # --- HALAMAN ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v3.8)")
+    st.title("🛡️ Admin Dashboard (v3.9)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -430,8 +496,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v3.8", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v3.8")
+    st.set_page_config(page_title="SO System v3.9", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v3.9")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
