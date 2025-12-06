@@ -4,8 +4,10 @@ from supabase import create_client
 from datetime import datetime
 import time
 import io
+# [v3.2] Import Style untuk Excel (Wajib install openpyxl)
+from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.1] ---
+# --- KONFIGURASI [v3.2] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Sales A", "Sales B", "Sales C", "Supervisor", "Store Manager"]
@@ -20,12 +22,34 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- FUNGSI HELPER EXCEL [v3.1] ---
+# --- FUNGSI HELPER EXCEL [v3.2 - STYLING] ---
 def convert_df_to_excel(df):
-    """Mengubah DataFrame menjadi file Excel di memory"""
+    """Mengubah DataFrame menjadi file Excel dengan Header Cantik (Blibli Style)"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Data_SO')
+        
+        # Akses worksheet untuk styling
+        worksheet = writer.sheets['Data_SO']
+        
+        # Definisi Style Header
+        # Warna Biru Blibli (#0095DA)
+        blibli_blue_fill = PatternFill(start_color="0095DA", end_color="0095DA", fill_type="solid")
+        white_bold_font = Font(color="FFFFFF", bold=True, size=11)
+        center_align = Alignment(horizontal='center', vertical='center')
+        
+        # Terapkan style ke baris pertama (Header)
+        for cell in worksheet[1]:
+            cell.fill = blibli_blue_fill
+            cell.font = white_bold_font
+            cell.alignment = center_align
+            
+        # [v3.2] Fitur Auto-Adjust Lebar Kolom
+        for column_cells in worksheet.columns:
+            length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
+            # Tambahkan sedikit padding (+5) agar tidak terlalu mepet
+            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
+
     return output.getvalue()
 
 # --- FUNGSI HELPER DATABASE ---
@@ -220,7 +244,7 @@ def page_sales():
 
 # --- HALAMAN ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v3.1)")
+    st.title("🛡️ Admin Dashboard (v3.2)")
     
     active_session = get_active_session_info()
     st.info(f"📅 Sesi Aktif: **{active_session}**")
@@ -283,14 +307,13 @@ def page_admin():
             
             st.dataframe(df)
             
-            # [v3.1] LOGIKA DOWNLOAD EXCEL BARU
             st.subheader("📥 Download Backup Excel")
             
             # Buat nama file dinamis dengan Tanggal
             tanggal_hari_ini = datetime.now().strftime("%Y-%m-%d")
             nama_file_excel = f"Laporan_SO_{tanggal_hari_ini}.xlsx"
             
-            # Konversi ke Excel
+            # Konversi ke Excel dengan Style Cantik [v3.2]
             excel_data = convert_df_to_excel(df)
             
             st.download_button(
@@ -302,9 +325,9 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v3.1", page_icon="📦", layout="wide")
+    st.set_page_config(page_title="SO System v3.2", page_icon="📦", layout="wide")
     
-    st.sidebar.title("SO Apps v3.1")
+    st.sidebar.title("SO Apps v3.2")
     active_sess = get_active_session_info()
     st.sidebar.success(f"Sesi: {active_sess}")
     
