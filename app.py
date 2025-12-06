@@ -6,10 +6,11 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.5] ---
+# --- KONFIGURASI [v3.6] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
+RESET_PIN = "123456" # [v3.6] PIN untuk Reset Data
 
 if not SUPABASE_URL:
     st.error("⚠️ Database belum dikonfigurasi. Cek secrets.toml")
@@ -81,22 +82,25 @@ def update_stock(id_barang, qty_fisik, nama_sales):
 
 # --- FUNGSI ADMIN: PROSES DATA ---
 
-# Logic 1: Reset & Start New (Untuk Master Toko)
+# [v3.6] Fungsi Hapus Sesi Aktif (Hard Reset)
+def delete_active_session():
+    try:
+        # Hapus semua data yang is_active = True
+        supabase.table("stock_opname").delete().eq("is_active", True).execute()
+        return True, "Sesi aktif berhasil dihapus total."
+    except Exception as e: return False, str(e)
+
 def start_new_session(df, session_name):
     try:
-        # Arsipkan sesi lama
         supabase.table("stock_opname").update({"is_active": False}).eq("is_active", True).execute()
         return process_and_insert(df, session_name)
     except Exception as e: return False, str(e)
 
-# Logic 2: Append / Tambah (Untuk Master Konsinyasi) - [FITUR BARU v3.5]
 def add_to_current_session(df, current_session_name):
     try:
-        # Tidak ada update is_active=False disini, langsung insert
         return process_and_insert(df, current_session_name)
     except Exception as e: return False, str(e)
 
-# Shared Insert Logic
 def process_and_insert(df, session_name):
     data_to_insert = []
     for _, row in df.iterrows():
@@ -146,7 +150,6 @@ def merge_offline_data(df):
         return True, success_count
     except Exception as e: return False, str(e)
 
-# [FITUR BARU] Template Khusus Master Data (Tanpa Kolom Hitungan Fisik)
 def get_master_template_excel():
     data = {
         'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
@@ -156,7 +159,7 @@ def get_master_template_excel():
         'Serial Number': ['SN123', '', ''],
         'LOKASI': ['Floor', 'Gudang', 'Floor'],
         'JENIS': ['Stok', 'Stok', 'Stok'],
-        'Quantity': [10, 100, 50] # Master data hanya butuh System Qty
+        'Quantity': [10, 100, 50]
     }
     df = pd.DataFrame(data)
     output = io.BytesIO()
@@ -278,10 +281,9 @@ def page_sales():
 
 # --- HALAMAN ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v3.5)")
+    st.title("🛡️ Admin Dashboard (v3.6)")
     active_session = get_active_session_info()
     
-    # Header Status Sesi
     if active_session == "Belum Ada Sesi Aktif":
         st.warning("⚠️ Belum ada sesi aktif. Silakan mulai sesi baru di bawah.")
     else:
@@ -291,15 +293,12 @@ def page_admin():
     
     with tab1:
         st.write("---")
-
-        # [UPDATE] Tombol Download Template Master Data
         st.markdown("### 📁 Template Master Data")
         st.caption("Download template ini untuk menyusun data Master Barang (Toko/Konsinyasi) sebelum di-upload.")
         st.download_button("⬇️ Download Template Master Excel", get_master_template_excel(), "Template_Master_Data.xlsx")
         
         st.write("---")
 
-        # BAGIAN 1: MULAI SESI BARU (RESET)
         st.subheader("🅰️ Mulai Sesi Baru (Reset Data)")
         st.caption("Gunakan ini untuk upload File Master Utama (Barang Toko). Data lama akan diarsipkan.")
         
@@ -317,7 +316,6 @@ def page_admin():
 
         st.write("---")
         
-        # BAGIAN 2: TAMBAH DATA (APPEND) - [FITUR BARU v3.5]
         st.subheader("🅱️ Tambah Master Konsinyasi (Append)")
         st.caption("Gunakan ini untuk menambah barang Konsinyasi ke sesi yang sedang berjalan. **Data Toko TIDAK AKAN HILANG.**")
         
@@ -329,13 +327,31 @@ def page_admin():
                 if st.button("➕ TAMBAHKAN KE SESI INI"):
                     with st.spinner("Menambahkan Data..."):
                         df_cons = pd.read_excel(file_cons)
-                        # Paksa owner jadi Konsinyasi jika di excel kosong (Optional logic, but good for safety)
-                        if 'OWNER' not in df_cons.columns:
-                            df_cons['OWNER'] = 'Konsinyasi'
-                        
+                        if 'OWNER' not in df_cons.columns: df_cons['OWNER'] = 'Konsinyasi'
                         ok, msg = add_to_current_session(df_cons, active_session)
                         if ok: st.success(f"Berhasil menambahkan {msg} Data Konsinyasi ke sesi '{active_session}'."); time.sleep(2); st.rerun()
                         else: st.error(f"Gagal: {msg}")
+
+        # [v3.6] Danger Zone Reset
+        st.write("---")
+        with st.expander("⚠️ DANGER ZONE (Reset Sesi Aktif)"):
+            st.warning("Tindakan ini akan MENGHAPUS SEMUA DATA PADA SESI AKTIF SAAT INI. Gunakan jika salah upload file master dan ingin mengulang dari kosong tanpa membuat arsip.")
+            
+            dz_col1, dz_col2 = st.columns([2, 1])
+            input_pin = dz_col1.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456")
+            confirm_reset = dz_col1.checkbox("Saya sadar data sesi ini akan hilang permanen.")
+            
+            if dz_col2.button("🔥 HAPUS SESI INI"):
+                if input_pin == RESET_PIN:
+                    if confirm_reset:
+                        with st.spinner("Menghapus Sesi Aktif..."):
+                            ok, msg = delete_active_session()
+                            if ok: st.success("Sesi berhasil di-reset!"); time.sleep(2); st.rerun()
+                            else: st.error(f"Gagal: {msg}")
+                    else:
+                        st.error("Harap centang konfirmasi dulu.")
+                else:
+                    st.error("PIN Salah.")
 
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
@@ -366,7 +382,6 @@ def page_admin():
 
         if not df.empty:
             st.markdown("---")
-            # Metric KPI
             reguler_count = len(df[df['owner_category'] == 'Reguler'])
             konsin_count = len(df[df['owner_category'] == 'Konsinyasi'])
             
@@ -379,46 +394,24 @@ def page_admin():
             
             st.markdown("### 📥 Download Laporan (Terpisah)")
             tgl = datetime.now().strftime('%Y-%m-%d')
-            
             col_d1, col_d2, col_d3 = st.columns(3)
-            
-            # 1. Download ALL
             with col_d1:
-                st.download_button(
-                    "📥 Laporan LENGKAP (All)", 
-                    convert_df_to_excel(df), 
-                    f"SO_Full_{tgl}.xlsx", 
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            
-            # 2. Download Reguler Only
+                st.download_button("📥 Laporan LENGKAP (All)", convert_df_to_excel(df), f"SO_Full_{tgl}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             with col_d2:
                 df_reg = df[df['owner_category'] == 'Reguler']
                 if not df_reg.empty:
-                    st.download_button(
-                        "📥 Laporan REGULER (Toko)", 
-                        convert_df_to_excel(df_reg), 
-                        f"SO_Toko_{tgl}.xlsx", 
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                    st.download_button("📥 Laporan REGULER (Toko)", convert_df_to_excel(df_reg), f"SO_Toko_{tgl}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 else: st.caption("Data Reguler Kosong")
-
-            # 3. Download Konsinyasi Only
             with col_d3:
                 df_cons = df[df['owner_category'] == 'Konsinyasi']
                 if not df_cons.empty:
-                    st.download_button(
-                        "📥 Laporan KONSINYASI", 
-                        convert_df_to_excel(df_cons), 
-                        f"SO_Konsinyasi_{tgl}.xlsx", 
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                    st.download_button("📥 Laporan KONSINYASI", convert_df_to_excel(df_cons), f"SO_Konsinyasi_{tgl}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 else: st.caption("Data Konsinyasi Kosong")
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v3.5", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v3.5")
+    st.set_page_config(page_title="SO System v3.6", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v3.6")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
