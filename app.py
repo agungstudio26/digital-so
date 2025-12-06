@@ -6,7 +6,7 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.4] ---
+# --- KONFIGURASI [v3.5] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -26,16 +26,13 @@ def convert_df_to_excel(df):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # [v3.4] Pastikan urutan kolom laporan rapi
         cols = ['batch_id', 'sku', 'brand', 'nama_barang', 'owner_category', 'lokasi', 'jenis', 'system_qty', 'fisik_qty', 'updated_by', 'updated_at']
-        # Filter kolom yang ada saja (jika data kosong)
         available_cols = [c for c in cols if c in df.columns]
         df_export = df[available_cols] if not df.empty else df
         
         df_export.to_excel(writer, index=False, sheet_name='Data_SO')
         worksheet = writer.sheets['Data_SO']
         
-        # Style Header (Biru Blibli)
         blibli_blue_fill = PatternFill(start_color="0095DA", end_color="0095DA", fill_type="solid")
         white_bold_font = Font(color="FFFFFF", bold=True, size=11)
         center_align = Alignment(horizontal='center', vertical='center')
@@ -58,7 +55,6 @@ def get_active_session_info():
         return "Belum Ada Sesi Aktif"
     except: return "-"
 
-# [v3.4] Tambah Filter owner_category
 def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=True, batch_id=None):
     query = supabase.table("stock_opname").select("*")
     if only_active: query = query.eq("is_active", True)
@@ -66,13 +62,12 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
     
     if lokasi: query = query.eq("lokasi", lokasi)
     if jenis: query = query.eq("jenis", jenis)
-    if owner: query = query.eq("owner_category", owner) # Filter Reguler vs Konsinyasi
+    if owner: query = query.eq("owner_category", owner)
     
     response = query.order("nama_barang").execute()
     df = pd.DataFrame(response.data)
     
     if not df.empty and search_term:
-        # Search di Brand, Nama, atau SKU
         df = df[df['nama_barang'].str.contains(search_term, case=False, na=False) | 
                 df['brand'].str.contains(search_term, case=False, na=False) |
                 df['sku'].str.contains(search_term, case=False, na=False)]
@@ -84,44 +79,54 @@ def update_stock(id_barang, qty_fisik, nama_sales):
         "fisik_qty": qty_fisik, "updated_at": now, "updated_by": nama_sales 
     }).eq("id", id_barang).execute()
 
-# --- FUNGSI ADMIN ---
+# --- FUNGSI ADMIN: PROSES DATA ---
+
+# Logic 1: Reset & Start New (Untuk Master Toko)
 def start_new_session(df, session_name):
     try:
+        # Arsipkan sesi lama
         supabase.table("stock_opname").update({"is_active": False}).eq("is_active", True).execute()
-        data_to_insert = []
-        for _, row in df.iterrows():
-            is_sn = pd.notna(row.get('Serial Number')) and str(row.get('Serial Number')).strip() != ''
-            
-            # [v3.4] Logika Pemisahan Brand & Owner
-            # Ambil dari Excel, jika tidak ada default ke Reguler / Unknown
-            owner_val = row.get('OWNER', 'Reguler') 
-            if pd.isna(owner_val) or str(owner_val).strip() == '': owner_val = 'Reguler'
-            
-            brand_val = row.get('BRAND', 'General')
-            if pd.isna(brand_val) or str(brand_val).strip() == '': 
-                # Coba ambil dari kata pertama nama produk jika kolom brand kosong
-                brand_val = str(row.get('Product', '')).split()[0]
-
-            item = {
-                "sku": str(row.get('Internal Reference', '')),
-                "nama_barang": row.get('Product', 'Unknown'),
-                "brand": str(brand_val).upper(), # Simpan Brand Terpisah
-                "owner_category": str(owner_val).title(), # Simpan Reguler/Konsinyasi
-                "serial_number": str(row.get('Serial Number')) if is_sn else None,
-                "kategori_barang": 'SN' if is_sn else 'NON-SN',
-                "lokasi": row.get('LOKASI'),
-                "jenis": row.get('JENIS'),
-                "system_qty": int(row.get('Quantity', 0)),
-                "fisik_qty": 0, "updated_by": "-", "is_active": True, "batch_id": session_name
-            }
-            data_to_insert.append(item)
-        
-        # Batch insert
-        batch_size = 500
-        for i in range(0, len(data_to_insert), batch_size):
-            supabase.table("stock_opname").insert(data_to_insert[i:i+batch_size]).execute()
-        return True, len(data_to_insert)
+        return process_and_insert(df, session_name)
     except Exception as e: return False, str(e)
+
+# Logic 2: Append / Tambah (Untuk Master Konsinyasi) - [FITUR BARU v3.5]
+def add_to_current_session(df, current_session_name):
+    try:
+        # Tidak ada update is_active=False disini, langsung insert
+        return process_and_insert(df, current_session_name)
+    except Exception as e: return False, str(e)
+
+# Shared Insert Logic
+def process_and_insert(df, session_name):
+    data_to_insert = []
+    for _, row in df.iterrows():
+        is_sn = pd.notna(row.get('Serial Number')) and str(row.get('Serial Number')).strip() != ''
+        
+        owner_val = row.get('OWNER', 'Reguler') 
+        if pd.isna(owner_val) or str(owner_val).strip() == '': owner_val = 'Reguler'
+        
+        brand_val = row.get('BRAND', 'General')
+        if pd.isna(brand_val) or str(brand_val).strip() == '': 
+            brand_val = str(row.get('Product', '')).split()[0]
+
+        item = {
+            "sku": str(row.get('Internal Reference', '')),
+            "nama_barang": row.get('Product', 'Unknown'),
+            "brand": str(brand_val).upper(),
+            "owner_category": str(owner_val).title(),
+            "serial_number": str(row.get('Serial Number')) if is_sn else None,
+            "kategori_barang": 'SN' if is_sn else 'NON-SN',
+            "lokasi": row.get('LOKASI'),
+            "jenis": row.get('JENIS'),
+            "system_qty": int(row.get('Quantity', 0)),
+            "fisik_qty": 0, "updated_by": "-", "is_active": True, "batch_id": session_name
+        }
+        data_to_insert.append(item)
+    
+    batch_size = 500
+    for i in range(0, len(data_to_insert), batch_size):
+        supabase.table("stock_opname").insert(data_to_insert[i:i+batch_size]).execute()
+    return True, len(data_to_insert)
 
 def merge_offline_data(df):
     try:
@@ -141,13 +146,12 @@ def merge_offline_data(df):
         return True, success_count
     except Exception as e: return False, str(e)
 
-# [v3.4] Template Excel Baru (Ada Kolom BRAND & OWNER)
 def get_template_excel():
     data = {
         'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
-        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'], # Kolom Baru
+        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
         'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
-        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'], # Kolom Baru (Reguler/Konsinyasi)
+        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
         'Serial Number': ['SN123', '', ''],
         'LOKASI': ['Floor', 'Gudang', 'Floor'],
         'JENIS': ['Stok', 'Stok', 'Stok'],
@@ -174,7 +178,6 @@ def page_sales():
         with col_id:
             nama_user = st.selectbox("👤 Nama Pemeriksa", DAFTAR_SALES)
         with col_area:
-            # [v3.4] Panel Pemisah Reguler vs Konsinyasi
             st.write("---")
             owner_opt = st.radio("Sumber Barang:", ["Reguler (Milik Toko)", "Konsinyasi (Titipan)"], horizontal=True)
             owner_filter = "Reguler" if "Reguler" in owner_opt else "Konsinyasi"
@@ -182,7 +185,6 @@ def page_sales():
 
             c1, c2 = st.columns(2)
             lokasi = c1.selectbox("Lokasi", ["Floor", "Gudang"])
-            
             opsi_jenis = ["Stok", "Demo"]
             if lokasi == "Gudang": opsi_jenis = ["Stok"]
             jenis = c2.selectbox("Jenis", opsi_jenis)
@@ -193,28 +195,24 @@ def page_sales():
     if st.button("🔄 Refresh Data"):
         st.session_state['last_fetch'] = time.time()
 
-    # Get Data dengan filter OWNER
     df = get_data(lokasi, jenis, owner_filter, search_txt, only_active=True)
 
     if df.empty:
         st.info(f"Tidak ada data barang **{owner_filter}** di {lokasi}-{jenis}.")
-        if search_txt: st.warning(f"Pencarian '{search_txt}' tidak ditemukan.")
         return
 
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
 
-    # TABEL SN
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)}) - {owner_filter}")
         df_sn['Ditemukan'] = df_sn['fisik_qty'] > 0
         edited_sn = st.data_editor(
-            # [v3.4] Tampilkan Brand di tabel sales juga biar yakin
             df_sn[['id', 'brand', 'nama_barang', 'serial_number', 'updated_by', 'Ditemukan']],
             column_config={
                 "Ditemukan": st.column_config.CheckboxColumn("Ada?", default=False),
                 "updated_by": st.column_config.TextColumn("Checker", disabled=True),
-                "brand": st.column_config.TextColumn("Merek", disabled=True), # Kolom Brand
+                "brand": st.column_config.TextColumn("Merek", disabled=True),
                 "id": None
             },
             hide_index=True, use_container_width=True, key="sn"
@@ -228,7 +226,6 @@ def page_sales():
                     n += 1
             if n > 0: st.toast(f"✅ {n} SN Tersimpan!"); time.sleep(0.5); st.rerun()
 
-    # TABEL NON-SN
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)}) - {owner_filter}")
         edited_non = st.data_editor(
@@ -236,7 +233,7 @@ def page_sales():
             column_config={
                 "fisik_qty": st.column_config.NumberColumn("Fisik", min_value=0),
                 "system_qty": st.column_config.NumberColumn("Sistem", disabled=True),
-                "brand": st.column_config.TextColumn("Merek", disabled=True), # Kolom Brand
+                "brand": st.column_config.TextColumn("Merek", disabled=True),
                 "updated_by": st.column_config.TextColumn("Checker", disabled=True),
                 "id": None
             },
@@ -259,39 +256,64 @@ def page_sales():
 
 # --- HALAMAN ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v3.4)")
+    st.title("🛡️ Admin Dashboard (v3.5)")
     active_session = get_active_session_info()
-    st.info(f"📅 Sesi Aktif: **{active_session}**")
     
-    tab1, tab2, tab3 = st.tabs(["🚀 Sesi Baru", "📥 Upload Offline", "🗄️ Laporan & Backup"])
+    # Header Status Sesi
+    if active_session == "Belum Ada Sesi Aktif":
+        st.warning("⚠️ Belum ada sesi aktif. Silakan mulai sesi baru di bawah.")
+    else:
+        st.info(f"📅 Sesi Aktif: **{active_session}**")
+    
+    tab1, tab2, tab3 = st.tabs(["🚀 Master Data", "📥 Upload Offline", "🗄️ Laporan Akhir"])
     
     with tab1:
-        st.markdown("### Buat Sesi Baru")
-        st.warning("Pastikan Excel Master sudah ada kolom **BRAND** dan **OWNER** agar rapi.")
+        st.write("---")
+        # BAGIAN 1: MULAI SESI BARU (RESET)
+        st.subheader("🅰️ Mulai Sesi Baru (Reset Data)")
+        st.caption("Gunakan ini untuk upload File Master Utama (Barang Toko). Data lama akan diarsipkan.")
         
-        # [v3.4] Info Format Baru
-        with st.expander("Lihat Format Kolom Excel Baru"):
-            st.markdown("""
-            Agar laporan otomatis rapi, tambahkan kolom:
-            - **BRAND**: Isi merek (Samsung, Oppo, Robot, dll).
-            - **OWNER**: Isi 'Reguler' atau 'Konsinyasi'.
-            """)
-
-        new_session_name = st.text_input("Nama Sesi Baru", placeholder="Contoh: SO Pekan 2 Nov")
-        file_master = st.file_uploader("Upload Master Odoo", type="xlsx", key="u1")
+        c1, c2 = st.columns([2, 1])
+        new_session_name = c1.text_input("Nama Sesi Baru", placeholder="Contoh: SO Pekan 2 Nov")
+        file_master = c1.file_uploader("Upload Master Odoo (Toko)", type="xlsx", key="u_main")
+        
         if file_master and new_session_name:
-            if st.button("🔥 MULAI SESI BARU", type="primary"):
-                with st.spinner("Proses..."):
+            if c1.button("🔥 MULAI SESI BARU", type="primary"):
+                with st.spinner("Mereset & Upload..."):
                     df = pd.read_excel(file_master)
                     ok, msg = start_new_session(df, new_session_name)
-                    if ok: st.success(f"Sesi dimulai! {msg} data."); time.sleep(2); st.rerun()
+                    if ok: st.success(f"Sesi '{new_session_name}' Dimulai! {msg} Data Toko Masuk."); time.sleep(2); st.rerun()
                     else: st.error(f"Gagal: {msg}")
-    
+
+        st.write("---")
+        
+        # BAGIAN 2: TAMBAH DATA (APPEND) - [FITUR BARU v3.5]
+        st.subheader("🅱️ Tambah Master Konsinyasi (Append)")
+        st.caption("Gunakan ini untuk menambah barang Konsinyasi ke sesi yang sedang berjalan. **Data Toko TIDAK AKAN HILANG.**")
+        
+        if active_session == "Belum Ada Sesi Aktif":
+            st.error("🚫 Buat sesi baru dulu di atas, baru bisa tambah data konsinyasi.")
+        else:
+            file_cons = st.file_uploader("Upload Master Konsinyasi", type="xlsx", key="u_cons")
+            if file_cons:
+                if st.button("➕ TAMBAHKAN KE SESI INI"):
+                    with st.spinner("Menambahkan Data..."):
+                        df_cons = pd.read_excel(file_cons)
+                        # Paksa owner jadi Konsinyasi jika di excel kosong (Optional logic, but good for safety)
+                        if 'OWNER' not in df_cons.columns:
+                            df_cons['OWNER'] = 'Konsinyasi'
+                        
+                        ok, msg = add_to_current_session(df_cons, active_session)
+                        if ok: st.success(f"Berhasil menambahkan {msg} Data Konsinyasi ke sesi '{active_session}'."); time.sleep(2); st.rerun()
+                        else: st.error(f"Gagal: {msg}")
+
     with tab2:
-        st.markdown("### Upload Susulan")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v3.4.xlsx")
+        st.markdown("### Upload Susulan (Offline Recovery)")
+        st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge.")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v3.5.xlsx")
+        
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
-        if file_offline and st.button("Merge Data"):
+        if file_offline and st.button("Merge Data Offline"):
             with st.spinner("Merging..."):
                 df_off = pd.read_excel(file_offline)
                 if 'Hitungan Fisik' not in df_off.columns: st.error("Format salah! Wajib ada kolom 'Hitungan Fisik'.")
@@ -314,25 +336,59 @@ def page_admin():
 
         if not df.empty:
             st.markdown("---")
-            # [v3.4] Metric KPI by Owner
+            # Metric KPI
             reguler_count = len(df[df['owner_category'] == 'Reguler'])
             konsin_count = len(df[df['owner_category'] == 'Konsinyasi'])
             
             c1, c2, c3 = st.columns(3)
             c1.metric("Total SKU", len(df))
-            c2.metric("Barang Reguler", reguler_count)
-            c3.metric("Barang Konsinyasi", konsin_count)
+            c2.metric("Milik Toko", reguler_count)
+            c3.metric("Milik Vendor (Konsinyasi)", konsin_count)
             
             st.dataframe(df)
             
-            st.subheader("📥 Download Laporan (Sudah Dipisah Brand)")
-            fname = f"Laporan_SO_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
-            st.download_button("📥 Download Excel (.xlsx)", convert_df_to_excel(df), fname, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.markdown("### 📥 Download Laporan (Terpisah)")
+            tgl = datetime.now().strftime('%Y-%m-%d')
+            
+            col_d1, col_d2, col_d3 = st.columns(3)
+            
+            # 1. Download ALL
+            with col_d1:
+                st.download_button(
+                    "📥 Laporan LENGKAP (All)", 
+                    convert_df_to_excel(df), 
+                    f"SO_Full_{tgl}.xlsx", 
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            
+            # 2. Download Reguler Only
+            with col_d2:
+                df_reg = df[df['owner_category'] == 'Reguler']
+                if not df_reg.empty:
+                    st.download_button(
+                        "📥 Laporan REGULER (Toko)", 
+                        convert_df_to_excel(df_reg), 
+                        f"SO_Toko_{tgl}.xlsx", 
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else: st.caption("Data Reguler Kosong")
+
+            # 3. Download Konsinyasi Only
+            with col_d3:
+                df_cons = df[df['owner_category'] == 'Konsinyasi']
+                if not df_cons.empty:
+                    st.download_button(
+                        "📥 Laporan KONSINYASI", 
+                        convert_df_to_excel(df_cons), 
+                        f"SO_Konsinyasi_{tgl}.xlsx", 
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else: st.caption("Data Konsinyasi Kosong")
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v3.4", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v3.4")
+    st.set_page_config(page_title="SO System v3.5", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v3.5")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
