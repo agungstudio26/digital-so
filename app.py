@@ -146,6 +146,28 @@ def merge_offline_data(df):
         return True, success_count
     except Exception as e: return False, str(e)
 
+# [FITUR BARU] Template Khusus Master Data (Tanpa Kolom Hitungan Fisik)
+def get_master_template_excel():
+    data = {
+        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
+        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
+        'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
+        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
+        'Serial Number': ['SN123', '', ''],
+        'LOKASI': ['Floor', 'Gudang', 'Floor'],
+        'JENIS': ['Stok', 'Stok', 'Stok'],
+        'Quantity': [10, 100, 50] # Master data hanya butuh System Qty
+    }
+    df = pd.DataFrame(data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Template_Master')
+        worksheet = writer.sheets['Template_Master']
+        for column_cells in worksheet.columns:
+            length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
+    return output.getvalue()
+
 def get_template_excel():
     data = {
         'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
@@ -269,6 +291,14 @@ def page_admin():
     
     with tab1:
         st.write("---")
+
+        # [UPDATE] Tombol Download Template Master Data
+        st.markdown("### 📁 Template Master Data")
+        st.caption("Download template ini untuk menyusun data Master Barang (Toko/Konsinyasi) sebelum di-upload.")
+        st.download_button("⬇️ Download Template Master Excel", get_master_template_excel(), "Template_Master_Data.xlsx")
+        
+        st.write("---")
+
         # BAGIAN 1: MULAI SESI BARU (RESET)
         st.subheader("🅰️ Mulai Sesi Baru (Reset Data)")
         st.caption("Gunakan ini untuk upload File Master Utama (Barang Toko). Data lama akan diarsipkan.")
