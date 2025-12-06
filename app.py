@@ -476,37 +476,28 @@ def page_admin():
         st.divider()
         st.subheader("🔥 Hapus Sesi Aktif")
         
-        # [v3.9 Final UI Fix - ALIGNMENT & POSITIONING] 
-        # Menggunakan 2 kolom besar untuk Input/Checkbox, dan menempatkan tombol di bawahnya.
+        # [Final UI Fix - Tombol Pindah di bawah Checkbox] 
+        # Menggunakan satu kolom input dan menempatkan tombol di baris berikutnya.
+
+        input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456", key="final_pin")
         
-        dz_col_input, dz_col_button = st.columns([3, 1]) 
+        # Checkbox di baris berikutnya
+        st.session_state['confirm_reset_state'] = st.checkbox("Saya sadar data sesi ini akan hilang permanen.", key="final_check")
         
-        with dz_col_input:
-            # Kolom 1: PIN Input
-            input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456")
-            
-            # Kolom 2: Checkbox
-            st.session_state['confirm_reset_state'] = st.checkbox("Saya sadar data sesi ini akan hilang permanen.")
+        st.write("") # Spacer ringan
         
-        with dz_col_button:
-            # Spacer untuk meluruskan tombol di bawah checkbox
-            st.write("") 
-            st.write("") 
-            st.write("")
-            st.write("")
-            st.write("")
-            
-            if st.button("🔥 HAPUS SESI INI", use_container_width=True):
-                if input_pin == RESET_PIN:
-                    if st.session_state.get('confirm_reset_state', False): 
-                        with st.spinner("Menghapus Sesi Aktif..."):
-                            ok, msg = delete_active_session()
-                            if ok: st.success("Sesi berhasil di-reset!"); time.sleep(2); st.rerun()
-                            else: st.error(f"Gagal: {msg}")
-                    else:
-                        st.error("Harap centang konfirmasi dulu.")
+        # Tombol di baris paling bawah, full width
+        if st.button("🔥 HAPUS SESI INI", use_container_width=True):
+            if input_pin == RESET_PIN:
+                if st.session_state.get('confirm_reset_state', False): 
+                    with st.spinner("Menghapus Sesi Aktif..."):
+                        ok, msg = delete_active_session()
+                        if ok: st.success("Sesi berhasil di-reset!"); time.sleep(2); st.rerun()
+                        else: st.error(f"Gagal: {msg}")
                 else:
-                    st.error("PIN Salah.")
+                    st.error("Harap centang konfirmasi dulu.")
+            else:
+                st.error("PIN Salah.")
 
 # --- MAIN ---
 def main():
