@@ -4,13 +4,15 @@ from supabase import create_client
 from datetime import datetime
 import time
 import io
-# [v3.2] Import Style untuk Excel (Wajib install openpyxl)
+# [v3.2] Import Style untuk Excel
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.2] ---
+# --- KONFIGURASI [v3.3] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
-DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa"]
+
+# [v3.3] Update Daftar Sales (+Mita)
+DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
 
 if not SUPABASE_URL:
     st.error("⚠️ Database belum dikonfigurasi. Cek secrets.toml")
@@ -22,56 +24,41 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- FUNGSI HELPER EXCEL [v3.2 - STYLING] ---
+# --- FUNGSI HELPER EXCEL ---
 def convert_df_to_excel(df):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik (Blibli Style)"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Data_SO')
-        
-        # Akses worksheet untuk styling
         worksheet = writer.sheets['Data_SO']
         
-        # Definisi Style Header
-        # Warna Biru Blibli (#0095DA)
+        # Style Header
         blibli_blue_fill = PatternFill(start_color="0095DA", end_color="0095DA", fill_type="solid")
         white_bold_font = Font(color="FFFFFF", bold=True, size=11)
         center_align = Alignment(horizontal='center', vertical='center')
         
-        # Terapkan style ke baris pertama (Header)
         for cell in worksheet[1]:
             cell.fill = blibli_blue_fill
             cell.font = white_bold_font
             cell.alignment = center_align
             
-        # [v3.2] Fitur Auto-Adjust Lebar Kolom
         for column_cells in worksheet.columns:
             length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
-            # Tambahkan sedikit padding (+5) agar tidak terlalu mepet
             worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
-
     return output.getvalue()
 
 # --- FUNGSI HELPER DATABASE ---
-
 def get_active_session_info():
-    """Mengambil nama sesi yang sedang aktif saat ini"""
     try:
         res = supabase.table("stock_opname").select("batch_id").eq("is_active", True).limit(1).execute()
-        if res.data:
-            return res.data[0]['batch_id']
+        if res.data: return res.data[0]['batch_id']
         return "Belum Ada Sesi Aktif"
-    except:
-        return "-"
+    except: return "-"
 
 def get_data(lokasi=None, jenis=None, search_term=None, only_active=True, batch_id=None):
     query = supabase.table("stock_opname").select("*")
-    
-    if only_active:
-        query = query.eq("is_active", True)
-    elif batch_id:
-        query = query.eq("batch_id", batch_id)
-        
+    if only_active: query = query.eq("is_active", True)
+    elif batch_id: query = query.eq("batch_id", batch_id)
     if lokasi: query = query.eq("lokasi", lokasi)
     if jenis: query = query.eq("jenis", jenis)
     
@@ -86,21 +73,16 @@ def get_data(lokasi=None, jenis=None, search_term=None, only_active=True, batch_
 def update_stock(id_barang, qty_fisik, nama_sales):
     now = datetime.utcnow().isoformat()
     supabase.table("stock_opname").update({
-        "fisik_qty": qty_fisik, 
-        "updated_at": now,
-        "updated_by": nama_sales 
+        "fisik_qty": qty_fisik, "updated_at": now, "updated_by": nama_sales 
     }).eq("id", id_barang).execute()
 
-# --- FUNGSI ADMIN SUPER ---
-
+# --- FUNGSI ADMIN ---
 def start_new_session(df, session_name):
     try:
         supabase.table("stock_opname").update({"is_active": False}).eq("is_active", True).execute()
-        
         data_to_insert = []
         for _, row in df.iterrows():
             is_sn = pd.notna(row.get('Serial Number')) and str(row.get('Serial Number')).strip() != ''
-            
             item = {
                 "sku": str(row.get('Internal Reference', '')),
                 "nama_barang": row.get('Product', 'Unknown'),
@@ -109,71 +91,50 @@ def start_new_session(df, session_name):
                 "lokasi": row.get('LOKASI'),
                 "jenis": row.get('JENIS'),
                 "system_qty": int(row.get('Quantity', 0)),
-                "fisik_qty": 0,
-                "updated_by": "-",
-                "is_active": True,
-                "batch_id": session_name
+                "fisik_qty": 0, "updated_by": "-", "is_active": True, "batch_id": session_name
             }
             data_to_insert.append(item)
-        
         for i in range(0, len(data_to_insert), 500):
             supabase.table("stock_opname").insert(data_to_insert[i:i+500]).execute()
-            
         return True, len(data_to_insert)
-    except Exception as e:
-        return False, str(e)
+    except Exception as e: return False, str(e)
 
 def merge_offline_data(df):
     try:
         success_count = 0
         my_bar = st.progress(0)
         total_rows = len(df)
-        
         for i, row in df.iterrows():
             sku_excel = str(row.get('Internal Reference', ''))
             qty_to_update = row.get('Hitungan Fisik')
-            
             if pd.notna(qty_to_update):
                 supabase.table("stock_opname").update({
-                    "fisik_qty": int(qty_to_update),
-                    "updated_by": "Offline Upload",
+                    "fisik_qty": int(qty_to_update), "updated_by": "Offline Upload",
                     "updated_at": datetime.utcnow().isoformat()
                 }).eq("sku", sku_excel).eq("is_active", True).execute()
                 success_count += 1
-            
             my_bar.progress((i + 1) / total_rows)
-            
         return True, success_count
-    except Exception as e:
-        return False, str(e)
+    except Exception as e: return False, str(e)
 
-# [v3.2 Updated] Template Excel dengan Contoh Strategi "Search Brand"
 def get_template_excel():
     data = {
-        'Internal Reference': ['SAM-S24-001', 'OPP-R8-002', 'ACC-CBL-001', 'ACC-CHG-002'],
-        'Product': [
-            'Samsung Galaxy S24 Ultra (Nama Brand Wajib di Depan)', 
-            'Oppo Reno 8 5G', 
-            'Vivan Kabel Data Type C', 
-            'Robot Charger Fast Charging'
-        ],
-        'Serial Number': ['SN12345678', 'SN87654321', '', ''],
-        'LOKASI': ['Floor', 'Floor', 'Gudang', 'Gudang'],
-        'JENIS': ['Stok', 'Stok', 'Stok', 'Stok'],
-        'Quantity': [10, 5, 100, 50],
-        'Hitungan Fisik': [10, 5, 98, 50] # Kolom untuk offline mode
+        'Internal Reference': ['SAM-S24-001', 'OPP-R8-002', 'ACC-CBL-001'],
+        'Product': ['Samsung Galaxy S24 Ultra', 'Oppo Reno 8 5G', 'Vivan Kabel Data Type C'],
+        'Serial Number': ['SN12345678', 'SN87654321', ''],
+        'LOKASI': ['Floor', 'Floor', 'Gudang'],
+        'JENIS': ['Stok', 'Stok', 'Stok'],
+        'Quantity': [10, 5, 100],
+        'Hitungan Fisik': [10, 5, 98]
     }
     df = pd.DataFrame(data)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Template_Master')
-        
-        # Auto width styling
         worksheet = writer.sheets['Template_Master']
         for column_cells in worksheet.columns:
             length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
             worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
-            
     return output.getvalue()
 
 # --- HALAMAN SALES ---
@@ -187,11 +148,18 @@ def page_sales():
             nama_user = st.selectbox("👤 Nama Pemeriksa", DAFTAR_SALES)
         with col_area:
             c1, c2 = st.columns(2)
+            # [v3.3] Logika Dropdown Pintar
             lokasi = c1.selectbox("Lokasi", ["Floor", "Gudang"])
-            jenis = c2.selectbox("Jenis", ["Stok", "Demo"])
+            
+            # Jika Gudang, jenis DEMO hilang
+            opsi_jenis = ["Stok", "Demo"]
+            if lokasi == "Gudang":
+                opsi_jenis = ["Stok"]
+                
+            jenis = c2.selectbox("Jenis", opsi_jenis)
     
     st.divider()
-    search_txt = st.text_input("🔍 Cari Barang (Wajib Ketik Merek)", placeholder="Contoh: Samsung, Oppo, atau Kabel...")
+    search_txt = st.text_input("🔍 Cari Barang (Wajib Ketik Merek)", placeholder="Contoh: Samsung, Oppo, TV, Kulkas...")
     
     if st.button("🔄 Refresh"):
         st.session_state['last_fetch'] = time.time()
@@ -199,16 +167,14 @@ def page_sales():
     df = get_data(lokasi, jenis, search_txt, only_active=True)
 
     if df.empty:
-        if search_txt:
-            st.warning(f"Barang '{search_txt}' tidak ditemukan di area ini. Pastikan filter Lokasi & Jenis benar.")
-        else:
-            st.info("ℹ️ Silakan ketik nama Merek/Barang di kolom pencarian di atas untuk memunculkan data.")
+        if search_txt: st.warning(f"Barang '{search_txt}' tidak ditemukan di {lokasi} - {jenis}.")
+        else: st.info(f"Silakan ketik Merek di pencarian. (Area: {lokasi} - {jenis})")
         return
 
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
 
-    # --- TABEL SN ---
+    # TABEL SN
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)})")
         df_sn['Ditemukan'] = df_sn['fisik_qty'] > 0
@@ -230,7 +196,7 @@ def page_sales():
                     n += 1
             if n > 0: st.toast(f"✅ {n} SN Tersimpan!"); time.sleep(0.5); st.rerun()
 
-    # --- TABEL NON-SN ---
+    # TABEL NON-SN
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)})")
         edited_non = st.data_editor(
@@ -260,8 +226,7 @@ def page_sales():
 
 # --- HALAMAN ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v3.2)")
-    
+    st.title("🛡️ Admin Dashboard (v3.3)")
     active_session = get_active_session_info()
     st.info(f"📅 Sesi Aktif: **{active_session}**")
     
@@ -272,7 +237,6 @@ def page_admin():
         st.warning("Membuat sesi baru akan mengarsipkan sesi yang sedang berjalan.")
         new_session_name = st.text_input("Nama Sesi Baru", placeholder="Contoh: SO Pekan 2 Nov")
         file_master = st.file_uploader("Upload Master Odoo", type="xlsx", key="u1")
-        
         if file_master and new_session_name:
             if st.button("🔥 MULAI SESI BARU", type="primary"):
                 with st.spinner("Proses..."):
@@ -282,10 +246,8 @@ def page_admin():
                     else: st.error(f"Gagal: {msg}")
     
     with tab2:
-        st.markdown("### Upload Susulan (Internet Mati)")
-        st.write("Gunakan template ini untuk Sales input offline. Kolom 'Product' sudah diberi contoh format 'Brand di Depan'.")
-        st.download_button("⬇️ Download Template Offline / Master", get_template_excel(), "Template_SO_Master.xlsx")
-        
+        st.markdown("### Upload Susulan")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline.xlsx")
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data"):
             with st.spinner("Merging..."):
@@ -297,19 +259,15 @@ def page_admin():
                     else: st.error(f"Gagal: {count}")
 
     with tab3:
-        # Pilihan Mode
         mode_view = st.radio("Pilih Data:", ["Sesi Aktif Sekarang", "Arsip / History Lama"], horizontal=True)
         df = pd.DataFrame()
-        
-        if mode_view == "Sesi Aktif Sekarang":
-            df = get_data(only_active=True)
+        if mode_view == "Sesi Aktif Sekarang": df = get_data(only_active=True)
         else:
             try:
                 res = supabase.table("stock_opname").select("batch_id").eq("is_active", False).execute()
                 batches = sorted(list(set([x['batch_id'] for x in res.data])), reverse=True)
                 selected_batch = st.selectbox("Pilih Sesi Lama:", batches) if batches else None
-                if selected_batch:
-                    df = get_data(only_active=False, batch_id=selected_batch)
+                if selected_batch: df = get_data(only_active=False, batch_id=selected_batch)
             except: st.error("Gagal load history.")
 
         if not df.empty:
@@ -322,32 +280,18 @@ def page_admin():
             k1.metric("Total SKU", total)
             k2.metric("Sudah Dicek", f"{checked}")
             k3.metric("Selisih", selisih, delta_color="inverse")
-            
             st.dataframe(df)
             
             st.subheader("📥 Download Backup Excel")
-            
-            tanggal_hari_ini = datetime.now().strftime("%Y-%m-%d")
-            nama_file_excel = f"Laporan_SO_{tanggal_hari_ini}.xlsx"
-            excel_data = convert_df_to_excel(df)
-            
-            st.download_button(
-                label="📥 Download Laporan (Excel .xlsx)",
-                data=excel_data,
-                file_name=nama_file_excel,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            fname = f"Laporan_SO_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+            st.download_button("📥 Download Laporan (Excel .xlsx)", convert_df_to_excel(df), fname, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v3.2", page_icon="📦", layout="wide")
-    
-    st.sidebar.title("SO Apps v3.2")
-    active_sess = get_active_session_info()
-    st.sidebar.success(f"Sesi: {active_sess}")
-    
+    st.set_page_config(page_title="SO System v3.3", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v3.3")
+    st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
-    
     if menu == "Sales Input": page_sales()
     elif menu == "Admin Panel":
         pwd = st.sidebar.text_input("Password Admin", type="password")
