@@ -476,20 +476,19 @@ def page_admin():
         st.divider()
         st.subheader("🔥 Hapus Sesi Aktif")
         
-        # [v3.9 Fix] Mengatur ulang kolom input agar lebih sejajar
-        dz_col1, dz_col2 = st.columns([3, 1]) 
+        # [v3.9 Final UI Fix] Menggunakan 3 kolom kecil untuk mengatur penempatan tombol
+        dz_col_pin, dz_col_btn, dz_col_check = st.columns([2.5, 1, 3]) 
         
-        with dz_col1:
+        with dz_col_pin:
             input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456")
-            st.write("") # Spacer untuk menjaga checkbox tetap di bawah
-            confirm_reset = st.checkbox("Saya sadar data sesi ini akan hilang permanen.")
         
-        with dz_col2:
-            st.write("") # Spacer 1 (Menggantikan Label PIN)
-            st.write("") # Spacer 2 (Menjajarkan tombol dengan kotak input PIN)
+        # Tombol dipindah ke kiri bawah Checkbox
+        with dz_col_btn:
+            st.write("") # Spacer 1
+            st.write("") # Spacer 2 (Menjajarkan tombol dengan input PIN)
             if st.button("🔥 HAPUS SESI INI", use_container_width=True):
                 if input_pin == RESET_PIN:
-                    if confirm_reset:
+                    if st.session_state.get('confirm_reset_state', False): # Cek state dari checkbox
                         with st.spinner("Menghapus Sesi Aktif..."):
                             ok, msg = delete_active_session()
                             if ok: st.success("Sesi berhasil di-reset!"); time.sleep(2); st.rerun()
@@ -498,6 +497,11 @@ def page_admin():
                         st.error("Harap centang konfirmasi dulu.")
                 else:
                     st.error("PIN Salah.")
+        
+        with dz_col_check:
+            st.write("") # Spacer 1 (Untuk Checkbox)
+            # Menggunakan session state untuk menyimpan status checkbox di luar tombol
+            st.session_state['confirm_reset_state'] = st.checkbox("Saya sadar data sesi ini akan hilang permanen.")
 
 # --- MAIN ---
 def main():
