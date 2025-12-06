@@ -10,7 +10,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # --- KONFIGURASI [v3.2] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
-DAFTAR_SALES = ["Sales A", "Sales B", "Sales C", "Supervisor", "Store Manager"]
+DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa"]
 
 if not SUPABASE_URL:
     st.error("⚠️ Database belum dikonfigurasi. Cek secrets.toml")
