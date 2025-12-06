@@ -481,14 +481,12 @@ def page_admin():
         
         with dz_col1:
             input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456")
-            # Trik spacer untuk meluruskan tombol dengan checkbox di bawah
-            st.write("") 
+            st.write("") # Spacer untuk menjaga checkbox tetap di bawah
             confirm_reset = st.checkbox("Saya sadar data sesi ini akan hilang permanen.")
         
         with dz_col2:
-            # Trik spacer untuk meluruskan tombol dengan input box di atas
-            st.text("") 
-            st.write("") 
+            st.write("") # Spacer 1 (Menggantikan Label PIN)
+            st.write("") # Spacer 2 (Menjajarkan tombol dengan kotak input PIN)
             if st.button("🔥 HAPUS SESI INI", use_container_width=True):
                 if input_pin == RESET_PIN:
                     if confirm_reset:
