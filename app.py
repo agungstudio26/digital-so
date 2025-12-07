@@ -30,7 +30,6 @@ def parse_supabase_timestamp(timestamp_str):
              timestamp_str = timestamp_str[:-1] + '+00:00'
         return datetime.fromisoformat(timestamp_str)
     except Exception as e:
-        # Fallback jika parsing gagal
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 def convert_df_to_excel(df):
@@ -79,7 +78,6 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
     response = query.order("nama_barang").execute()
     df = pd.DataFrame(response.data)
 
-    # [FIX v4.1] Tambahkan kolom keterangan jika belum ada (safety check)
     if 'keterangan' not in df.columns:
         df['keterangan'] = ""
 
@@ -94,10 +92,26 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
     return df
 
 def get_db_updated_at(id_barang):
-    """Fungsi helper untuk mengambil updated_at dari DB saat ini"""
-    # [FIX v4.1] Tambahkan 'keterangan' dalam select untuk memastikan data ada di payload
-    res = supabase.table("stock_opname").select("updated_at, updated_by, keterangan").eq("id", id_barang).single().execute()
-    return res.data['updated_at'], res.data['updated_by']
+    """
+    [FIX v4.1] Mengganti .single() dengan .limit(1) untuk menghindari APIError.
+    Mengembalikan tuple: (timestamp_string, updated_by)
+    """
+    try:
+        # Mengganti .single() dengan .limit(1) dan .execute()
+        res = supabase.table("stock_opname").select("updated_at, updated_by").eq("id", id_barang).limit(1).execute()
+        
+        if res.data and len(res.data) > 0:
+            data = res.data[0]
+            return data.get('updated_at'), data.get('updated_by')
+        else:
+            # Jika item tidak ditemukan (seharusnya tidak terjadi), kembalikan default
+            return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM"
+            
+    except Exception as e:
+        st.error(f"Error fetching data for conflict check: {e}")
+        # Mengembalikan nilai yang pasti lebih lama dari loaded_time saat error
+        return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM_ERROR"
+
 
 # --- FUNGSI ADMIN: PROSES DATA ---
 def delete_active_session():
@@ -140,7 +154,7 @@ def process_and_insert(df, session_name):
             "jenis": row.get('JENIS'),
             "system_qty": int(row.get('Quantity', 0)),
             "fisik_qty": 0, "updated_by": "-", "is_active": True, "batch_id": session_name,
-            "keterangan": "" # Inisiasi kolom keterangan
+            "keterangan": ""
         }
         data_to_insert.append(item)
     
@@ -225,20 +239,19 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
     original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == id_barang]
     
     if original_row_match.empty:
-        # Ini mencegah IndexError
         st.error(f"Error: Item ID {id_barang} tidak ditemukan di sesi awal.")
         return 0, True
 
     original_row = original_row_match.iloc[0]
     original_qty = original_row['fisik_qty']
 
-    # Jika keterangan dikosongkan padahal ada selisih, kembalikan ke keterangan lama
     keterangan_to_save = keterangan
-    if not keterangan_to_save and original_row['keterangan']:
-        # Jika user tidak mengisi tapi di DB ada keterangan lama, pakai yang lama
+    if not keterangan_to_save and original_row.get('keterangan'):
         keterangan_to_save = original_row['keterangan']
 
-    if original_qty != new_qty or (original_row['keterangan'].strip() != keterangan_to_save.strip()):
+    if original_qty != new_qty or (original_row.get('keterangan', '').strip() != keterangan_to_save.strip()):
+        
+        # Cek Konflik
         db_updated_at_str, updated_by_db = get_db_updated_at(id_barang)
         db_updated_at = parse_supabase_timestamp(db_updated_at_str)
         
@@ -246,7 +259,7 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
             st.error(f"⚠️ KONFLIK DATA: **{row['nama_barang']}**! Data diubah oleh **{updated_by_db}** pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon **Muat Ulang Data**.")
             return 0, True
 
-        # [v4.1] Tambahkan keterangan ke payload update
+        # Lakukan Update
         update_payload = {
             "fisik_qty": new_qty, 
             "updated_at": datetime.utcnow().isoformat(), 
@@ -265,7 +278,6 @@ def page_sales():
     st.title(f"📱 SO: {session_name}")
     
     with st.container():
-        # [v4.0] Filter area tetap rapi
         c_pemeriksa, c_owner, c_lokasi, c_jenis = st.columns([1, 1, 0.7, 0.7])
 
         with c_pemeriksa:
@@ -293,7 +305,7 @@ def page_sales():
         
     search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...")
     
-    if st.button("🔄 Muat Ulang Data"): # Ganti Refresh agar lebih jelas
+    if st.button("🔄 Muat Ulang Data"):
         st.cache_data.clear()
         st.session_state.pop('current_df', None)
         st.rerun()
@@ -325,7 +337,6 @@ def page_sales():
             checkbox_key = f"sn_check_{item_id}"
             notes_key = f"notes_sn_{item_id}"
             
-            # Ambil keterangan lama dari row (penting saat refresh)
             current_notes = row.get('keterangan', '')
             
             with st.expander(f"**{row['brand']}** | {row['nama_barang']} | Status: :{status_color}[{status_text}]", expanded=False):
@@ -345,13 +356,12 @@ def page_sales():
                         new_qty = 1 if new_check else 0
                         state_changed = (new_qty != row['fisik_qty'])
 
-                        # Jika status berubah ATAU keterangan diisi, kita proses.
                         if state_changed:
                             if not keterangan.strip():
                                 st.error("Wajib isi Keterangan karena status SN berubah (Koreksi data).")
                                 continue 
                         
-                        if not state_changed and not keterangan.strip() and not current_notes.strip():
+                        if not state_changed and current_notes.strip() == keterangan.strip():
                             st.info("Tidak ada perubahan yang tersimpan.")
                             continue
 
@@ -401,12 +411,10 @@ def page_sales():
                         has_discrepancy_vs_system = (new_qty != row['system_qty']) 
                         qty_changed_from_db = (new_qty != row['fisik_qty'])
 
-                        # Validasi Keterangan: Jika ada selisih vs Sistem, Keterangan wajib diisi.
                         if has_discrepancy_vs_system and not keterangan.strip():
                             st.error("Wajib isi Keterangan karena ada Selisih antara Fisik dan Sistem.")
                             continue 
                         
-                        # Hanya update jika ada perubahan QTY dari DB ATAU perubahan Keterangan
                         if not qty_changed_from_db and current_notes.strip() == keterangan.strip():
                              st.info("Tidak ada perubahan yang tersimpan.")
                              continue
@@ -420,7 +428,7 @@ def page_sales():
                             st.info("Tidak ada perubahan yang tersimpan.")
 
 
-# --- HALAMAN ADMIN ---
+# --- FUNGSI ADMIN ---
 def page_admin():
     st.title("🛡️ Admin Dashboard (v4.1)")
     active_session = get_active_session_info()
