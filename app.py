@@ -6,7 +6,7 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.9 - Final Fix] ---
+# --- KONFIGURASI [v4.1 - Wajib Keterangan untuk Selisih] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -22,7 +22,7 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- FUNGSI HELPER WAKTU ---
+# --- FUNGSI HELPER WAKTU & KONVERSI ---
 def parse_supabase_timestamp(timestamp_str):
     """Mengubah string timestamp Supabase menjadi objek datetime yang aman"""
     try:
@@ -33,12 +33,12 @@ def parse_supabase_timestamp(timestamp_str):
         # Fallback jika parsing gagal
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-# --- FUNGSI HELPER EXCEL ---
 def convert_df_to_excel(df):
-    """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
+    """Mengubah DataFrame menjadi file Excel dengan Header Cantik, termasuk Keterangan"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        cols = ['batch_id', 'sku', 'brand', 'nama_barang', 'owner_category', 'lokasi', 'jenis', 'system_qty', 'fisik_qty', 'updated_by', 'updated_at']
+        # [v4.1] Tambahkan keterangan ke kolom ekspor
+        cols = ['batch_id', 'sku', 'brand', 'nama_barang', 'owner_category', 'lokasi', 'jenis', 'system_qty', 'fisik_qty', 'keterangan', 'updated_by', 'updated_at']
         available_cols = [c for c in cols if c in df.columns]
         df_export = df[available_cols] if not df.empty else df
         
@@ -67,7 +67,6 @@ def get_active_session_info():
         return "Belum Ada Sesi Aktif"
     except: return "-"
 
-# [v3.9] Tambahkan filter waktu untuk cek konflik
 def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=True, batch_id=None):
     query = supabase.table("stock_opname").select("*")
     if only_active: query = query.eq("is_active", True)
@@ -77,7 +76,6 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
     if jenis: query = query.eq("jenis", jenis)
     if owner: query = query.eq("owner_category", owner)
     
-    # Ambil data dan catat waktu pengambilan data (HARUS TIMEZONE AWARE!)
     start_time = datetime.now(timezone.utc)
     response = query.order("nama_barang").execute()
     df = pd.DataFrame(response.data)
@@ -87,9 +85,7 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
                 df['brand'].str.contains(search_term, case=False, na=False) |
                 df['sku'].str.contains(search_term, case=False, na=False)]
     
-    # Simpan waktu pengambilan data di session state untuk konflik check
     st.session_state['data_loaded_time'] = start_time
-    # Simpan dataframe asli di session state untuk perbandingan perubahan
     st.session_state['current_df'] = df.copy()
     
     return df
@@ -100,6 +96,9 @@ def get_db_updated_at(id_barang):
     return res.data['updated_at'], res.data['updated_by']
 
 # --- FUNGSI ADMIN: PROSES DATA ---
+
+# ... (Fungsi delete_active_session, start_new_session, add_to_current_session) ...
+# FUNGSI ADMIN: PROSES DATA (sama seperti v4.0)
 def delete_active_session():
     try:
         supabase.table("stock_opname").delete().eq("is_active", True).execute()
@@ -139,7 +138,8 @@ def process_and_insert(df, session_name):
             "lokasi": row.get('LOKASI'),
             "jenis": row.get('JENIS'),
             "system_qty": int(row.get('Quantity', 0)),
-            "fisik_qty": 0, "updated_by": "-", "is_active": True, "batch_id": session_name
+            "fisik_qty": 0, "updated_by": "-", "is_active": True, "batch_id": session_name,
+            "keterangan": "" # [v4.1] Inisiasi kolom keterangan
         }
         data_to_insert.append(item)
     
@@ -156,10 +156,12 @@ def merge_offline_data(df):
         for i, row in df.iterrows():
             sku_excel = str(row.get('Internal Reference', ''))
             qty_to_update = row.get('Hitungan Fisik')
+            keterangan_offline = row.get('Keterangan', '')
             if pd.notna(qty_to_update):
                 supabase.table("stock_opname").update({
                     "fisik_qty": int(qty_to_update), "updated_by": "Offline Upload",
-                    "updated_at": datetime.utcnow().isoformat()
+                    "updated_at": datetime.utcnow().isoformat(),
+                    "keterangan": str(keterangan_offline) if pd.notna(keterangan_offline) else ""
                 }).eq("sku", sku_excel).eq("is_active", True).execute()
                 success_count += 1
             my_bar.progress((i + 1) / total_rows)
@@ -197,7 +199,8 @@ def get_template_excel():
         'LOKASI': ['Floor', 'Gudang', 'Floor'],
         'JENIS': ['Stok', 'Stok', 'Stok'],
         'Quantity': [10, 100, 50],
-        'Hitungan Fisik': [10, 98, 50]
+        'Hitungan Fisik': [10, 98, 50],
+        'Keterangan': ['Hitungan Fisik Sesuai', 'Hilang 2 unit', '']
     }
     df = pd.DataFrame(data)
     output = io.BytesIO()
@@ -209,12 +212,53 @@ def get_template_excel():
             worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
     return output.getvalue()
 
+
+# --- LOGIKA CARD VIEW & UPDATE ---
+
+def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
+    """Logika pemrosesan, cek konflik, dan update untuk satu baris data"""
+    id_barang = row['id']
+    updates_count = 0
+    conflict_found = False
+
+    original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == id_barang]
+    
+    if original_row_match.empty:
+        # Ini mencegah IndexError yang kita perbaiki di v3.9
+        st.error(f"Error: Item ID {id_barang} tidak ditemukan di sesi awal.")
+        return 0, True
+
+    original_row = original_row_match.iloc[0]
+    original_qty = original_row['fisik_qty']
+
+    if original_qty != new_qty:
+        db_updated_at_str, updated_by_db = get_db_updated_at(id_barang)
+        db_updated_at = parse_supabase_timestamp(db_updated_at_str)
+        
+        if db_updated_at > loaded_time:
+            st.error(f"⚠️ KONFLIK DATA: **{row['nama_barang']}**! Data diubah oleh **{updated_by_db}** pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon **Muat Ulang Data**.")
+            return 0, True
+
+        # [v4.1] Tambahkan keterangan ke payload update
+        update_payload = {
+            "fisik_qty": new_qty, 
+            "updated_at": datetime.utcnow().isoformat(), 
+            "updated_by": nama_user,
+            "keterangan": keterangan 
+        }
+
+        supabase.table("stock_opname").update(update_payload).eq("id", id_barang).execute()
+        updates_count += 1
+        
+    return updates_count, conflict_found
+
 # --- HALAMAN SALES ---
 def page_sales():
     session_name = get_active_session_info()
     st.title(f"📱 SO: {session_name}")
     
     with st.container():
+        # [v4.0] Filter area tetap rapi
         c_pemeriksa, c_owner, c_lokasi, c_jenis = st.columns([1, 1, 0.7, 0.7])
 
         with c_pemeriksa:
@@ -242,7 +286,7 @@ def page_sales():
         
     search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...")
     
-    if st.button("🔄 Refresh Data"):
+    if st.button("🔄 Muat Ulang Data"): # Ganti Refresh agar lebih jelas
         st.cache_data.clear()
         st.session_state.pop('current_df', None)
         st.rerun()
@@ -256,112 +300,117 @@ def page_sales():
 
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
+    
+    st.markdown("---")
 
-    # --- TABEL SN ---
+    # [v4.1] LIST BARANG SN (CARD VIEW DENGAN KETERANGAN WAJIB)
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)}) - {owner_filter}")
-        df_sn['Ditemukan'] = df_sn['fisik_qty'] > 0
-        edited_sn = st.data_editor(
-            df_sn[['id', 'brand', 'nama_barang', 'serial_number', 'updated_by', 'Ditemukan']],
-            column_config={
-                "Ditemukan": st.column_config.CheckboxColumn("Ada?", default=False),
-                "updated_by": st.column_config.TextColumn("Checker", disabled=True),
-                "brand": st.column_config.TextColumn("Merek", disabled=True),
-                "id": None
-            },
-            hide_index=True, use_container_width=True, key="sn"
-        )
-        if st.button("Simpan SN", type="primary"):
-            updates_count = 0
-            conflict_found = False
+        
+        for index, row in df_sn.iterrows():
+            item_id = row['id']
+            is_checked = row['fisik_qty'] > 0
             
-            for i, row in edited_sn.iterrows():
-                # [FIX v3.9] Cek apakah baris ID ada di DataFrame sesi sebelumnya
-                original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == row['id']]
-                
-                if original_row_match.empty:
-                    # Lewati baris yang tidak ditemukan di sesi awal (ini menghindari IndexError)
-                    continue 
-                
-                original_row = original_row_match.iloc[0]
-                
-                original_checked = original_row['fisik_qty'] > 0
-                new_checked = row['Ditemukan']
-                
-                if original_checked != new_checked:
-                    db_updated_at_str, updated_by_db = get_db_updated_at(row['id'])
-                    db_updated_at = parse_supabase_timestamp(db_updated_at_str)
-                    
-                    if db_updated_at > loaded_time:
-                        st.error(f"⚠️ KONFLIK DATA di SN {row['serial_number']} ({row['nama_barang']})! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi input Anda.")
-                        conflict_found = True
-                        break
-                    
-                    supabase.table("stock_opname").update({
-                        "fisik_qty": 1 if new_checked else 0, 
-                        "updated_at": datetime.utcnow().isoformat(), 
-                        "updated_by": nama_user
-                    }).eq("id", row['id']).execute()
-                    updates_count += 1
+            status_text = "Ditemukan" if is_checked else "Belum Dicek"
+            status_color = "green" if is_checked else "gray"
             
-            if not conflict_found:
-                if updates_count > 0: st.toast(f"✅ {updates_count} SN Tersimpan!"); time.sleep(0.5); st.rerun()
+            expander_key = f"sn_expander_{item_id}"
+            checkbox_key = f"sn_check_{item_id}"
+            notes_key = f"notes_sn_{item_id}" # [v4.1] Key baru untuk notes
+            
+            with st.expander(f"**{row['brand']}** | {row['nama_barang']} | Status: :{status_color}[{status_text}]", expanded=False):
+                col_info, col_input = st.columns([2, 1])
 
-    # --- TABEL NON-SN ---
+                with col_info:
+                    st.markdown(f"**SKU:** {row['sku']}")
+                    st.markdown(f"**SN:** `{row['serial_number']}`")
+                    st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
+                
+                with col_input:
+                    # Checkbox SN
+                    new_check = st.checkbox("ADA FISIK?", value=is_checked, key=checkbox_key)
+                    
+                    # [v4.1] Input Keterangan
+                    keterangan = st.text_area("Keterangan/Isu (Jika Status Berubah)", value="", key=notes_key, height=50)
+
+                    if st.button("Simpan Item SN", key=f"btn_sn_{item_id}", type="primary", use_container_width=True):
+                        new_qty = 1 if new_check else 0
+                        state_changed = (new_qty != row['fisik_qty'])
+
+                        # [v4.1] Validasi Keterangan
+                        if state_changed and not keterangan.strip():
+                            st.error("Wajib isi Keterangan karena status SN berubah (Koreksi data).")
+                            continue 
+                        
+                        if not state_changed:
+                            st.info("Tidak ada perubahan yang tersimpan.")
+                            continue
+                            
+                        updates, conflict = handle_update(row, new_qty, True, nama_user, loaded_time, keterangan.strip())
+                        if not conflict and updates > 0:
+                            st.toast(f"✅ SN {row['nama_barang']} disimpan!", icon="💾")
+                            time.sleep(0.5)
+                            st.rerun()
+                            
+    st.markdown("---")
+
+    # [v4.1] LIST BARANG NON-SN (CARD VIEW DENGAN KETERANGAN WAJIB)
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)}) - {owner_filter}")
-        edited_non = st.data_editor(
-            df_non[['id', 'brand', 'nama_barang', 'system_qty', 'fisik_qty', 'updated_by']],
-            column_config={
-                "fisik_qty": st.column_config.NumberColumn("Fisik", min_value=0),
-                "system_qty": st.column_config.NumberColumn("Sistem", disabled=True),
-                "brand": st.column_config.TextColumn("Merek", disabled=True),
-                "updated_by": st.column_config.TextColumn("Checker", disabled=True),
-                "id": None
-            },
-            hide_index=True, use_container_width=True, key="non"
-        )
-        
-        preview = edited_non.copy()
-        preview['selisih'] = preview['fisik_qty'] - preview['system_qty']
-        def color_row(val): return 'background-color: #d4edda' if val == 0 else 'background-color: #f8d7da'
-        st.dataframe(preview[['nama_barang', 'selisih']].style.map(color_row, subset=['selisih']), use_container_width=True, height=150)
 
-        if st.button("Simpan Non-SN", type="primary"):
-            updates_count = 0
-            conflict_found = False
-
-            for i, row in edited_non.iterrows():
-                # [FIX v3.9] Cek apakah baris ID ada di DataFrame sesi sebelumnya
-                original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == row['id']]
+        for index, row in df_non.iterrows():
+            item_id = row['id']
+            
+            default_qty = row['fisik_qty']
+            selisih = default_qty - row['system_qty']
+            
+            status_text = "MATCH" if selisih == 0 else ("LEBIH" if selisih > 0 else "KURANG")
+            status_color = "green" if selisih == 0 else "red"
+            
+            header_text = f"**{row['brand']}** | {row['nama_barang']} | Selisih: :{status_color}[{selisih}]"
+            
+            notes_key = f"notes_non_{item_id}" # [v4.1] Key baru untuk notes
+            
+            with st.expander(header_text, expanded=False):
+                col_info, col_input = st.columns([2, 1])
                 
-                if original_row_match.empty:
-                    continue 
-
-                original_row = original_row_match.iloc[0]
+                with col_info:
+                    st.markdown(f"**Odoo Qty:** `{row['system_qty']}`")
+                    st.markdown(f"**SKU:** {row['sku']}")
+                    st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
                 
-                if original_row['fisik_qty'] != row['fisik_qty']:
-                    db_updated_at_str, updated_by_db = get_db_updated_at(row['id'])
-                    db_updated_at = parse_supabase_timestamp(db_updated_at_str)
+                with col_input:
+                    # Input Angka Non-SN
+                    new_qty = st.number_input("JML FISIK", value=default_qty, min_value=0, step=1, key=f"qty_non_{item_id}", label_visibility="collapsed")
                     
-                    if db_updated_at > loaded_time:
-                        st.error(f"⚠️ KONFLIK DATA di {row['nama_barang']}! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi hitungan Anda.")
-                        conflict_found = True
-                        break 
+                    # [v4.1] Input Keterangan
+                    keterangan = st.text_area("Keterangan/Isu (Jika Selisih Qty)", value="", key=notes_key, height=50)
+
+                    if st.button("Simpan Item Non-SN", key=f"btn_non_{item_id}", type="primary", use_container_width=True):
                         
-                    supabase.table("stock_opname").update({
-                        "fisik_qty": row['fisik_qty'], 
-                        "updated_at": datetime.utcnow().isoformat(), 
-                        "updated_by": nama_user
-                    }).eq("id", row['id']).execute()
-                    updates_count += 1
+                        has_discrepancy = (new_qty != row['system_qty']) 
+                        qty_changed_from_db = (new_qty != row['fisik_qty'])
 
-            if not conflict_found:
-                if updates_count > 0: st.toast(f"✅ {updates_count} Data Tersimpan!"); time.sleep(0.5); st.rerun()
+                        # [v4.1] Validasi Keterangan: Jika ada selisih vs Sistem, Keterangan wajib diisi.
+                        if has_discrepancy and not keterangan.strip():
+                            st.error("Wajib isi Keterangan karena ada Selisih antara Fisik dan Sistem.")
+                            continue 
+                        
+                        # Hanya update jika ada perubahan dari data yang terakhir disimpan (di DB)
+                        if not qty_changed_from_db:
+                             st.info("Tidak ada perubahan yang tersimpan.")
+                             continue
 
-# --- HALAMAN ADMIN ---
+                        updates, conflict = handle_update(row, new_qty, False, nama_user, loaded_time, keterangan.strip())
+                        if not conflict and updates > 0:
+                            st.toast(f"✅ Qty {row['nama_barang']} disimpan!", icon="💾")
+                            time.sleep(0.5)
+                            st.rerun()
+
+
+# --- FUNGSI ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v3.9)")
+    st.title("🛡️ Admin Dashboard (v4.1)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -414,8 +463,8 @@ def page_admin():
 
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
-        st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge.")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v3.5.xlsx")
+        st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge. File harus ada kolom 'Keterangan'.")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.1.xlsx")
         
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data Offline"):
@@ -449,7 +498,8 @@ def page_admin():
             c2.metric("Milik Toko", reguler_count)
             c3.metric("Milik Vendor (Konsinyasi)", konsin_count)
             
-            st.dataframe(df)
+            # [v4.1] Tampilkan kolom Keterangan di Admin
+            st.dataframe(df[['sku', 'nama_barang', 'system_qty', 'fisik_qty', 'keterangan', 'updated_by', 'updated_at']])
             
             st.markdown("### 📥 Download Laporan (Terpisah)")
             tgl = datetime.now().strftime('%Y-%m-%d')
@@ -481,15 +531,10 @@ def page_admin():
         st.divider()
         st.subheader("🔥 Hapus Sesi Aktif")
         
-        # [Final UI Fix - Tombol Pindah di bawah Checkbox] 
-        # Menggunakan alur vertikal standar yang lebih andal.
-
         input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456", key="final_pin")
         
-        # Checkbox di baris berikutnya
         st.session_state['confirm_reset_state'] = st.checkbox("Saya sadar data sesi ini akan hilang permanen.", key="final_check")
         
-        # Tombol di baris paling bawah, full width
         if st.button("🔥 HAPUS SESI INI", use_container_width=True):
             if input_pin == RESET_PIN:
                 if st.session_state.get('confirm_reset_state', False): 
@@ -504,8 +549,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v3.9", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v3.9")
+    st.set_page_config(page_title="SO System v4.1", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v4.1")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
