@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from supabase import create_client
-from datetime import datetime, timezone # [FIX v3.9] Import timezone
+from datetime import datetime, timezone
 import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
@@ -22,19 +22,16 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- FUNGSI HELPER WAKTU BARU ---
+# --- FUNGSI HELPER WAKTU ---
 def parse_supabase_timestamp(timestamp_str):
     """Mengubah string timestamp Supabase menjadi objek datetime yang aman"""
     try:
-        # Supabase menggunakan format ISO 8601, kita gunakan fromisoformat
-        # Handle jika ada 'Z' (UTC) atau jika timezone offset (e.g., +00:00)
         if timestamp_str.endswith('Z'):
              timestamp_str = timestamp_str[:-1] + '+00:00'
         return datetime.fromisoformat(timestamp_str)
     except Exception as e:
-        # Fallback jika parsing gagal (misal data lama)
+        # Fallback jika parsing gagal
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
-
 
 # --- FUNGSI HELPER EXCEL ---
 def convert_df_to_excel(df):
@@ -81,7 +78,7 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
     if owner: query = query.eq("owner_category", owner)
     
     # Ambil data dan catat waktu pengambilan data (HARUS TIMEZONE AWARE!)
-    start_time = datetime.now(timezone.utc) # [FIX v3.9] Gunakan UTC
+    start_time = datetime.now(timezone.utc)
     response = query.order("nama_barang").execute()
     df = pd.DataFrame(response.data)
     
@@ -101,13 +98,6 @@ def get_db_updated_at(id_barang):
     """Fungsi helper untuk mengambil updated_at dari DB saat ini"""
     res = supabase.table("stock_opname").select("updated_at, updated_by").eq("id", id_barang).single().execute()
     return res.data['updated_at'], res.data['updated_by']
-
-def update_stock(id_barang, qty_fisik, nama_sales):
-    """
-    [v3.9] Fungsi update ini tidak lagi dipakai langsung. 
-    Logika update dan konflik check dipindahkan ke page_sales.
-    """
-    pass 
 
 # --- FUNGSI ADMIN: PROSES DATA ---
 def delete_active_session():
@@ -225,7 +215,6 @@ def page_sales():
     st.title(f"📱 SO: {session_name}")
     
     with st.container():
-        # [v3.9 Fix] Mengatur ulang kolom input agar lebih sejajar
         c_pemeriksa, c_owner, c_lokasi, c_jenis = st.columns([1, 1, 0.7, 0.7])
 
         with c_pemeriksa:
@@ -233,7 +222,7 @@ def page_sales():
             nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales)
         
         with c_owner:
-            st.caption("Sumber Barang:") # Menggunakan caption sebagai label atas
+            st.caption("Sumber Barang:")
             owner_opt = st.radio(" ", ["Reguler", "Konsinyasi"], horizontal=True, label_visibility="collapsed")
             owner_filter = "Reguler" if "Reguler" in owner_opt else "Konsinyasi"
 
@@ -254,11 +243,10 @@ def page_sales():
     search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...")
     
     if st.button("🔄 Refresh Data"):
-        st.cache_data.clear() # Clear cache data agar ambil data baru
+        st.cache_data.clear()
         st.session_state.pop('current_df', None)
         st.rerun()
 
-    # Ambil data. Waktu dan data disimpan ke st.session_state['data_loaded_time'] dan ['current_df'] di dalam fungsi get_data
     df = get_data(lokasi, jenis, owner_filter, search_term=search_txt, only_active=True)
     loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, tzinfo=timezone.utc))
     
@@ -287,27 +275,28 @@ def page_sales():
             updates_count = 0
             conflict_found = False
             
-            # [v3.9] Iterasi dan cek konflik sebelum save
             for i, row in edited_sn.iterrows():
-                # Dapatkan baris asli dari sesi state (yang kita punya saat loading)
-                original_row = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == row['id']].iloc[0]
+                # [FIX v3.9] Cek apakah baris ID ada di DataFrame sesi sebelumnya
+                original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == row['id']]
                 
-                # Cek apakah user membuat perubahan pada item ini
+                if original_row_match.empty:
+                    # Lewati baris yang tidak ditemukan di sesi awal (ini menghindari IndexError)
+                    continue 
+                
+                original_row = original_row_match.iloc[0]
+                
                 original_checked = original_row['fisik_qty'] > 0
                 new_checked = row['Ditemukan']
                 
                 if original_checked != new_checked:
-                    # Perubahan terdeteksi, lakukan cek konflik!
                     db_updated_at_str, updated_by_db = get_db_updated_at(row['id'])
-                    db_updated_at = parse_supabase_timestamp(db_updated_at_str) # [FIX v3.9] Gunakan fungsi parse
+                    db_updated_at = parse_supabase_timestamp(db_updated_at_str)
                     
                     if db_updated_at > loaded_time:
-                        # KONFLIK TERDETEKSI!
                         st.error(f"⚠️ KONFLIK DATA di SN {row['serial_number']} ({row['nama_barang']})! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi input Anda.")
                         conflict_found = True
-                        break # Stop proses simpan
+                        break
                     
-                    # Jika tidak ada konflik, lakukan update
                     supabase.table("stock_opname").update({
                         "fisik_qty": 1 if new_checked else 0, 
                         "updated_at": datetime.utcnow().isoformat(), 
@@ -343,21 +332,23 @@ def page_sales():
             conflict_found = False
 
             for i, row in edited_non.iterrows():
-                original_row = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == row['id']].iloc[0]
+                # [FIX v3.9] Cek apakah baris ID ada di DataFrame sesi sebelumnya
+                original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == row['id']]
                 
-                # Cek apakah user membuat perubahan pada item ini
+                if original_row_match.empty:
+                    continue 
+
+                original_row = original_row_match.iloc[0]
+                
                 if original_row['fisik_qty'] != row['fisik_qty']:
-                    # Perubahan terdeteksi, lakukan cek konflik!
                     db_updated_at_str, updated_by_db = get_db_updated_at(row['id'])
-                    db_updated_at = parse_supabase_timestamp(db_updated_at_str) # [FIX v3.9] Gunakan fungsi parse
+                    db_updated_at = parse_supabase_timestamp(db_updated_at_str)
                     
                     if db_updated_at > loaded_time:
-                        # KONFLIK TERDETEKSI!
                         st.error(f"⚠️ KONFLIK DATA di {row['nama_barang']}! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi hitungan Anda.")
                         conflict_found = True
                         break 
                         
-                    # Jika tidak ada konflik, lakukan update
                     supabase.table("stock_opname").update({
                         "fisik_qty": row['fisik_qty'], 
                         "updated_at": datetime.utcnow().isoformat(), 
