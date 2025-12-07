@@ -7,7 +7,7 @@ import io
 from openpyxl.styles import PatternFill, Font, Alignment
 from postgrest.exceptions import APIError # Import error spesifik
 
-# --- KONFIGURASI [v4.4 - Final Stability Fix] ---
+# --- KONFIGURASI [v4.4 - Stabil] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -25,6 +25,7 @@ supabase = init_connection()
 
 # --- FUNGSI HELPER WAKTU & KONVERSI ---
 def parse_supabase_timestamp(timestamp_str):
+    """Mengubah string timestamp Supabase menjadi objek datetime yang aman"""
     try:
         if timestamp_str and timestamp_str.endswith('Z'):
              timestamp_str = timestamp_str[:-1] + '+00:00'
@@ -33,6 +34,7 @@ def parse_supabase_timestamp(timestamp_str):
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 def convert_df_to_excel(df):
+    """Mengubah DataFrame menjadi file Excel dengan Header Cantik, termasuk Keterangan"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         cols = ['batch_id', 'sku', 'brand', 'nama_barang', 'owner_category', 'lokasi', 'jenis', 'system_qty', 'fisik_qty', 'keterangan', 'updated_by', 'updated_at']
@@ -145,7 +147,7 @@ def process_and_insert(df, session_name):
             "jenis": row.get('JENIS'),
             "system_qty": int(row.get('Quantity', 0)),
             "fisik_qty": 0, "updated_by": "-", "is_active": True, "batch_id": session_name,
-            "keterangan": None # Set ke None agar sesuai dengan kolom NULL-able di DB
+            "keterangan": None
         }
         data_to_insert.append(item)
     
@@ -236,9 +238,9 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
     original_row = original_row_match.iloc[0]
     original_qty = original_row['fisik_qty']
 
-    # [FIX v4.4] Pastikan nilai lama dan nilai baru diproses ke NULL-able
+    # [FIX v4.4] Mengubah Keterangan string kosong menjadi None agar database menerima
     original_notes = original_row.get('keterangan', '') if original_row.get('keterangan') is not None else ''
-    keterangan_to_save = keterangan if keterangan.strip() else None # Jika string kosong, set None
+    keterangan_to_save = keterangan if keterangan.strip() else None
 
     is_qty_changed = (original_qty != new_qty)
     is_notes_changed = (original_notes.strip() != (keterangan_to_save.strip() if keterangan_to_save else ''))
@@ -258,16 +260,16 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
             "fisik_qty": new_qty, 
             "updated_at": datetime.utcnow().isoformat(), 
             "updated_by": nama_user,
-            "keterangan": keterangan_to_save # Menggunakan nilai None atau string yang sudah dibersihkan
+            "keterangan": keterangan_to_save
         }
 
         try:
             supabase.table("stock_opname").update(update_payload).eq("id", id_barang).execute()
             updates_count += 1
         except APIError as api_e:
-            # Catch APIError spesifik dari Supabase (ini adalah bug yang Anda temukan)
-            st.error(f"❌ Gagal Simpan Item {row['nama_barang']}. Kemungkinan ID/Data Error. Mohon Cek Konfigurasi Database Anda. Detail: {api_e}")
-            return 0, True # Treat as conflict/failure
+            # Catch APIError spesifik dari Supabase
+            st.error(f"❌ Gagal Simpan Item {row['nama_barang']}. Mohon Cek Database/SKU. Detail: {api_e}")
+            return 0, True 
         
     return updates_count, conflict_found
 
