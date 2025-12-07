@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
-from postgrest.exceptions import APIError # Import error spesifik
+from postgrest.exceptions import APIError
 
-# --- KONFIGURASI [v4.4 - Stabil] ---
+# --- KONFIGURASI [v4.5 - Progress Bar Sales] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -238,7 +238,6 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
     original_row = original_row_match.iloc[0]
     original_qty = original_row['fisik_qty']
 
-    # [FIX v4.4] Mengubah Keterangan string kosong menjadi None agar database menerima
     original_notes = original_row.get('keterangan', '') if original_row.get('keterangan') is not None else ''
     keterangan_to_save = keterangan if keterangan.strip() else None
 
@@ -267,7 +266,6 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
             supabase.table("stock_opname").update(update_payload).eq("id", id_barang).execute()
             updates_count += 1
         except APIError as api_e:
-            # Catch APIError spesifik dari Supabase
             st.error(f"❌ Gagal Simpan Item {row['nama_barang']}. Mohon Cek Database/SKU. Detail: {api_e}")
             return 0, True 
         
@@ -321,9 +319,25 @@ def page_sales():
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
     
+    # [v4.5] Progress Monitoring
+    total_items = len(df)
+    # Item selesai jika fisik_qty > 0 (diasumsikan sudah dicek)
+    checked_items = len(df[df['fisik_qty'] > 0])
+    progress_percent = checked_items / total_items if total_items > 0 else 0
+    
+    st.markdown("---")
+    col_metric, col_bar = st.columns([1, 3])
+    
+    with col_metric:
+        st.metric("Item Selesai", f"{checked_items} / {total_items}")
+    with col_bar:
+        st.write("")
+        st.caption(f"Progress: {progress_percent * 100:.1f}%")
+        st.progress(progress_percent)
     st.markdown("---")
 
-    # [v4.4] LIST BARANG SN (Keterangan Opsional)
+
+    # [v4.5] LIST BARANG SN (Keterangan Opsional)
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)}) - {owner_filter}")
         
@@ -374,7 +388,7 @@ def page_sales():
                             
     st.markdown("---")
 
-    # [v4.4] LIST BARANG NON-SN (Keterangan Opsional)
+    # [v4.5] LIST BARANG NON-SN (Keterangan Opsional)
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)}) - {owner_filter}")
 
@@ -427,7 +441,7 @@ def page_sales():
 
 # --- FUNGSI ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v4.4)")
+    st.title("🛡️ Admin Dashboard (v4.5)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -481,7 +495,7 @@ def page_admin():
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
         st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge. File harus ada kolom 'Keterangan'.")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.4.xlsx")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.5.xlsx")
         
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data Offline"):
@@ -565,8 +579,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v4.4", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v4.4")
+    st.set_page_config(page_title="SO System v4.5", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v4.5")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
