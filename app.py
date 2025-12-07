@@ -6,7 +6,7 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v4.1 - Final Fix] ---
+# --- KONFIGURASI [v4.2 - Keterangan Opsional] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -92,26 +92,19 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
     return df
 
 def get_db_updated_at(id_barang):
-    """
-    [FIX v4.1] Mengganti .single() dengan .limit(1) untuk menghindari APIError.
-    Mengembalikan tuple: (timestamp_string, updated_by)
-    """
+    """Fungsi helper untuk mengambil updated_at dari DB saat ini"""
     try:
-        # Mengganti .single() dengan .limit(1) dan .execute()
         res = supabase.table("stock_opname").select("updated_at, updated_by").eq("id", id_barang).limit(1).execute()
         
         if res.data and len(res.data) > 0:
             data = res.data[0]
             return data.get('updated_at'), data.get('updated_by')
         else:
-            # Jika item tidak ditemukan (seharusnya tidak terjadi), kembalikan default
             return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM"
             
     except Exception as e:
         st.error(f"Error fetching data for conflict check: {e}")
-        # Mengembalikan nilai yang pasti lebih lama dari loaded_time saat error
         return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM_ERROR"
-
 
 # --- FUNGSI ADMIN: PROSES DATA ---
 def delete_active_session():
@@ -246,10 +239,12 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
     original_qty = original_row['fisik_qty']
 
     keterangan_to_save = keterangan
-    if not keterangan_to_save and original_row.get('keterangan'):
-        keterangan_to_save = original_row['keterangan']
+    
+    # Cek apakah ada perubahan Qty ATAU Keterangan
+    is_qty_changed = (original_qty != new_qty)
+    is_notes_changed = (original_row.get('keterangan', '').strip() != keterangan_to_save.strip())
 
-    if original_qty != new_qty or (original_row.get('keterangan', '').strip() != keterangan_to_save.strip()):
+    if is_qty_changed or is_notes_changed:
         
         # Cek Konflik
         db_updated_at_str, updated_by_db = get_db_updated_at(id_barang)
@@ -305,7 +300,7 @@ def page_sales():
         
     search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...")
     
-    if st.button("🔄 Muat Ulang Data"):
+    if st.button("🔄 Muat Ulang Data"): # Ganti Refresh agar lebih jelas
         st.cache_data.clear()
         st.session_state.pop('current_df', None)
         st.rerun()
@@ -322,7 +317,7 @@ def page_sales():
     
     st.markdown("---")
 
-    # [v4.1] LIST BARANG SN (CARD VIEW DENGAN KETERANGAN WAJIB)
+    # [v4.2] LIST BARANG SN (Keterangan Opsional)
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)}) - {owner_filter}")
         
@@ -333,7 +328,6 @@ def page_sales():
             status_text = "Ditemukan" if is_checked else "Belum Dicek"
             status_color = "green" if is_checked else "gray"
             
-            expander_key = f"sn_expander_{item_id}"
             checkbox_key = f"sn_check_{item_id}"
             notes_key = f"notes_sn_{item_id}"
             
@@ -346,21 +340,19 @@ def page_sales():
                     st.markdown(f"**SKU:** {row['sku']}")
                     st.markdown(f"**SN:** `{row['serial_number']}`")
                     st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
+                    if current_notes:
+                         st.markdown(f"**Catatan Sebelumnya:** `{current_notes}`")
                 
                 with col_input:
                     new_check = st.checkbox("ADA FISIK?", value=is_checked, key=checkbox_key)
                     
-                    keterangan = st.text_area("Keterangan/Isu (Jika Status Berubah)", value=current_notes, key=notes_key, height=50)
+                    # [v4.2] Keterangan sekarang Opsional
+                    keterangan = st.text_area("Keterangan/Isu (Opsional)", value=current_notes, key=notes_key, height=50)
 
                     if st.button("Simpan Item SN", key=f"btn_sn_{item_id}", type="primary", use_container_width=True):
                         new_qty = 1 if new_check else 0
                         state_changed = (new_qty != row['fisik_qty'])
 
-                        if state_changed:
-                            if not keterangan.strip():
-                                st.error("Wajib isi Keterangan karena status SN berubah (Koreksi data).")
-                                continue 
-                        
                         if not state_changed and current_notes.strip() == keterangan.strip():
                             st.info("Tidak ada perubahan yang tersimpan.")
                             continue
@@ -375,7 +367,7 @@ def page_sales():
                             
     st.markdown("---")
 
-    # [v4.1] LIST BARANG NON-SN (CARD VIEW DENGAN KETERANGAN WAJIB)
+    # [v4.2] LIST BARANG NON-SN (Keterangan Opsional)
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)}) - {owner_filter}")
 
@@ -400,21 +392,19 @@ def page_sales():
                     st.markdown(f"**Odoo Qty:** `{row['system_qty']}`")
                     st.markdown(f"**SKU:** {row['sku']}")
                     st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
+                    if current_notes:
+                         st.markdown(f"**Catatan Sebelumnya:** `{current_notes}`")
                 
                 with col_input:
                     new_qty = st.number_input("JML FISIK", value=default_qty, min_value=0, step=1, key=f"qty_non_{item_id}", label_visibility="collapsed")
                     
-                    keterangan = st.text_area("Keterangan/Isu (Jika Selisih Qty)", value=current_notes, key=notes_key, height=50)
+                    # [v4.2] Keterangan sekarang Opsional
+                    keterangan = st.text_area("Keterangan/Isu (Opsional)", value=current_notes, key=notes_key, height=50)
 
                     if st.button("Simpan Item Non-SN", key=f"btn_non_{item_id}", type="primary", use_container_width=True):
                         
-                        has_discrepancy_vs_system = (new_qty != row['system_qty']) 
                         qty_changed_from_db = (new_qty != row['fisik_qty'])
 
-                        if has_discrepancy_vs_system and not keterangan.strip():
-                            st.error("Wajib isi Keterangan karena ada Selisih antara Fisik dan Sistem.")
-                            continue 
-                        
                         if not qty_changed_from_db and current_notes.strip() == keterangan.strip():
                              st.info("Tidak ada perubahan yang tersimpan.")
                              continue
@@ -430,7 +420,7 @@ def page_sales():
 
 # --- FUNGSI ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v4.1)")
+    st.title("🛡️ Admin Dashboard (v4.2)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -484,7 +474,7 @@ def page_admin():
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
         st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge. File harus ada kolom 'Keterangan'.")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.1.xlsx")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.2.xlsx")
         
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data Offline"):
@@ -518,7 +508,6 @@ def page_admin():
             c2.metric("Milik Toko", reguler_count)
             c3.metric("Milik Vendor (Konsinyasi)", konsin_count)
             
-            # [v4.1] Tampilkan kolom Keterangan di Admin
             st.dataframe(df[['sku', 'nama_barang', 'system_qty', 'fisik_qty', 'keterangan', 'updated_by', 'updated_at']])
             
             st.markdown("### 📥 Download Laporan (Terpisah)")
@@ -569,8 +558,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v4.1", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v4.1")
+    st.set_page_config(page_title="SO System v4.2", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v4.2")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
