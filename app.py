@@ -6,7 +6,7 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v4.2 - Keterangan Opsional] ---
+# --- KONFIGURASI [v4.3 - Final Keterangan Fix] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -103,7 +103,7 @@ def get_db_updated_at(id_barang):
             return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM"
             
     except Exception as e:
-        st.error(f"Error fetching data for conflict check: {e}")
+        # Menghilangkan st.error di sini agar tidak spamming jika terjadi error
         return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM_ERROR"
 
 # --- FUNGSI ADMIN: PROSES DATA ---
@@ -237,12 +237,15 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
 
     original_row = original_row_match.iloc[0]
     original_qty = original_row['fisik_qty']
+    
+    # [FIX v4.3] Pastikan keterangan yang diambil dari DB itu string kosong jika None
+    original_notes = original_row.get('keterangan', '') if original_row.get('keterangan') is not None else ''
 
     keterangan_to_save = keterangan
     
     # Cek apakah ada perubahan Qty ATAU Keterangan
     is_qty_changed = (original_qty != new_qty)
-    is_notes_changed = (original_row.get('keterangan', '').strip() != keterangan_to_save.strip())
+    is_notes_changed = (original_notes.strip() != keterangan_to_save.strip())
 
     if is_qty_changed or is_notes_changed:
         
@@ -280,7 +283,7 @@ def page_sales():
             nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales)
         
         with c_owner:
-            st.caption("Sumber Barang:")
+            st.caption("Sumber Barang:") # Menggunakan caption sebagai label atas
             owner_opt = st.radio(" ", ["Reguler", "Konsinyasi"], horizontal=True, label_visibility="collapsed")
             owner_filter = "Reguler" if "Reguler" in owner_opt else "Konsinyasi"
 
@@ -300,7 +303,7 @@ def page_sales():
         
     search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...")
     
-    if st.button("🔄 Muat Ulang Data"):
+    if st.button("🔄 Muat Ulang Data"): # Ganti Refresh agar lebih jelas
         st.cache_data.clear()
         st.session_state.pop('current_df', None)
         st.rerun()
@@ -352,8 +355,9 @@ def page_sales():
                     if st.button("Simpan Item SN", key=f"btn_sn_{item_id}", type="primary", use_container_width=True):
                         new_qty = 1 if new_check else 0
                         state_changed = (new_qty != row['fisik_qty'])
+                        notes_changed = (current_notes.strip() != keterangan.strip())
 
-                        if not state_changed and current_notes.strip() == keterangan.strip():
+                        if not state_changed and not notes_changed:
                             st.info("Tidak ada perubahan yang tersimpan.")
                             continue
 
@@ -404,8 +408,10 @@ def page_sales():
                     if st.button("Simpan Item Non-SN", key=f"btn_non_{item_id}", type="primary", use_container_width=True):
                         
                         qty_changed_from_db = (new_qty != row['fisik_qty'])
+                        notes_changed = (current_notes.strip() != keterangan.strip())
 
-                        if not qty_changed_from_db and current_notes.strip() == keterangan.strip():
+
+                        if not qty_changed_from_db and not notes_changed:
                              st.info("Tidak ada perubahan yang tersimpan.")
                              continue
 
@@ -420,7 +426,7 @@ def page_sales():
 
 # --- FUNGSI ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v4.2)")
+    st.title("🛡️ Admin Dashboard (v4.3)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -558,8 +564,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v4.2", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v4.2")
+    st.set_page_config(page_title="SO System v4.3", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v4.3")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
