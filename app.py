@@ -7,7 +7,7 @@ import io
 from openpyxl.styles import PatternFill, Font, Alignment
 from postgrest.exceptions import APIError
 
-# --- KONFIGURASI [v4.5 - Progress Bar Sales] ---
+# --- KONFIGURASI [v4.6 - Progress QTY Based] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -319,17 +319,16 @@ def page_sales():
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
     
-    # [v4.5] Progress Monitoring
-    total_items = len(df)
-    # Item selesai jika fisik_qty > 0 (diasumsikan sudah dicek)
-    checked_items = len(df[df['fisik_qty'] > 0])
-    progress_percent = checked_items / total_items if total_items > 0 else 0
+    # [v4.6] Progress Monitoring - QTY Based
+    total_qty_sistem = df['system_qty'].sum()
+    total_qty_fisik_tercatat = df['fisik_qty'].sum()
+    progress_percent = total_qty_fisik_tercatat / total_qty_sistem if total_qty_sistem > 0 else 0
     
     st.markdown("---")
     col_metric, col_bar = st.columns([1, 3])
     
     with col_metric:
-        st.metric("Item Selesai", f"{checked_items} / {total_items}")
+        st.metric("Total Unit Dicatat", f"{total_qty_fisik_tercatat} / {total_qty_sistem}")
     with col_bar:
         st.write("")
         st.caption(f"Progress: {progress_percent * 100:.1f}%")
@@ -337,7 +336,7 @@ def page_sales():
     st.markdown("---")
 
 
-    # [v4.5] LIST BARANG SN (Keterangan Opsional)
+    # [v4.6] LIST BARANG SN (Keterangan Opsional)
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)}) - {owner_filter}")
         
@@ -388,7 +387,7 @@ def page_sales():
                             
     st.markdown("---")
 
-    # [v4.5] LIST BARANG NON-SN (Keterangan Opsional)
+    # [v4.6] LIST BARANG NON-SN (Keterangan Opsional)
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)}) - {owner_filter}")
 
@@ -441,7 +440,7 @@ def page_sales():
 
 # --- FUNGSI ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v4.5)")
+    st.title("🛡️ Admin Dashboard (v4.6)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -495,7 +494,7 @@ def page_admin():
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
         st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge. File harus ada kolom 'Keterangan'.")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.5.xlsx")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.6.xlsx")
         
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data Offline"):
@@ -579,8 +578,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v4.5", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v4.5")
+    st.set_page_config(page_title="SO System v4.6", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v4.6")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
