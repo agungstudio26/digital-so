@@ -2,3 +2,4 @@ streamlit
 pandas
 supabase
 openpyxl
+streamlit_js_eval
