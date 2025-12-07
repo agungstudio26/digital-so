@@ -300,7 +300,7 @@ def page_sales():
         
     search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...")
     
-    if st.button("🔄 Muat Ulang Data"): # Ganti Refresh agar lebih jelas
+    if st.button("🔄 Muat Ulang Data"):
         st.cache_data.clear()
         st.session_state.pop('current_df', None)
         st.rerun()
