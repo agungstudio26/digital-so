@@ -6,7 +6,7 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v4.1 - Wajib Keterangan untuk Selisih] ---
+# --- KONFIGURASI [v4.1 - Final Fix] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -37,7 +37,6 @@ def convert_df_to_excel(df):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik, termasuk Keterangan"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # [v4.1] Tambahkan keterangan ke kolom ekspor
         cols = ['batch_id', 'sku', 'brand', 'nama_barang', 'owner_category', 'lokasi', 'jenis', 'system_qty', 'fisik_qty', 'keterangan', 'updated_by', 'updated_at']
         available_cols = [c for c in cols if c in df.columns]
         df_export = df[available_cols] if not df.empty else df
@@ -79,7 +78,11 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
     start_time = datetime.now(timezone.utc)
     response = query.order("nama_barang").execute()
     df = pd.DataFrame(response.data)
-    
+
+    # [FIX v4.1] Tambahkan kolom keterangan jika belum ada (safety check)
+    if 'keterangan' not in df.columns:
+        df['keterangan'] = ""
+
     if not df.empty and search_term:
         df = df[df['nama_barang'].str.contains(search_term, case=False, na=False) | 
                 df['brand'].str.contains(search_term, case=False, na=False) |
@@ -92,13 +95,11 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
 
 def get_db_updated_at(id_barang):
     """Fungsi helper untuk mengambil updated_at dari DB saat ini"""
-    res = supabase.table("stock_opname").select("updated_at, updated_by").eq("id", id_barang).single().execute()
+    # [FIX v4.1] Tambahkan 'keterangan' dalam select untuk memastikan data ada di payload
+    res = supabase.table("stock_opname").select("updated_at, updated_by, keterangan").eq("id", id_barang).single().execute()
     return res.data['updated_at'], res.data['updated_by']
 
 # --- FUNGSI ADMIN: PROSES DATA ---
-
-# ... (Fungsi delete_active_session, start_new_session, add_to_current_session) ...
-# FUNGSI ADMIN: PROSES DATA (sama seperti v4.0)
 def delete_active_session():
     try:
         supabase.table("stock_opname").delete().eq("is_active", True).execute()
@@ -139,7 +140,7 @@ def process_and_insert(df, session_name):
             "jenis": row.get('JENIS'),
             "system_qty": int(row.get('Quantity', 0)),
             "fisik_qty": 0, "updated_by": "-", "is_active": True, "batch_id": session_name,
-            "keterangan": "" # [v4.1] Inisiasi kolom keterangan
+            "keterangan": "" # Inisiasi kolom keterangan
         }
         data_to_insert.append(item)
     
@@ -224,14 +225,20 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
     original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == id_barang]
     
     if original_row_match.empty:
-        # Ini mencegah IndexError yang kita perbaiki di v3.9
+        # Ini mencegah IndexError
         st.error(f"Error: Item ID {id_barang} tidak ditemukan di sesi awal.")
         return 0, True
 
     original_row = original_row_match.iloc[0]
     original_qty = original_row['fisik_qty']
 
-    if original_qty != new_qty:
+    # Jika keterangan dikosongkan padahal ada selisih, kembalikan ke keterangan lama
+    keterangan_to_save = keterangan
+    if not keterangan_to_save and original_row['keterangan']:
+        # Jika user tidak mengisi tapi di DB ada keterangan lama, pakai yang lama
+        keterangan_to_save = original_row['keterangan']
+
+    if original_qty != new_qty or (original_row['keterangan'].strip() != keterangan_to_save.strip()):
         db_updated_at_str, updated_by_db = get_db_updated_at(id_barang)
         db_updated_at = parse_supabase_timestamp(db_updated_at_str)
         
@@ -244,7 +251,7 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
             "fisik_qty": new_qty, 
             "updated_at": datetime.utcnow().isoformat(), 
             "updated_by": nama_user,
-            "keterangan": keterangan 
+            "keterangan": keterangan_to_save
         }
 
         supabase.table("stock_opname").update(update_payload).eq("id", id_barang).execute()
@@ -316,7 +323,10 @@ def page_sales():
             
             expander_key = f"sn_expander_{item_id}"
             checkbox_key = f"sn_check_{item_id}"
-            notes_key = f"notes_sn_{item_id}" # [v4.1] Key baru untuk notes
+            notes_key = f"notes_sn_{item_id}"
+            
+            # Ambil keterangan lama dari row (penting saat refresh)
+            current_notes = row.get('keterangan', '')
             
             with st.expander(f"**{row['brand']}** | {row['nama_barang']} | Status: :{status_color}[{status_text}]", expanded=False):
                 col_info, col_input = st.columns([2, 1])
@@ -327,30 +337,31 @@ def page_sales():
                     st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
                 
                 with col_input:
-                    # Checkbox SN
                     new_check = st.checkbox("ADA FISIK?", value=is_checked, key=checkbox_key)
                     
-                    # [v4.1] Input Keterangan
-                    keterangan = st.text_area("Keterangan/Isu (Jika Status Berubah)", value="", key=notes_key, height=50)
+                    keterangan = st.text_area("Keterangan/Isu (Jika Status Berubah)", value=current_notes, key=notes_key, height=50)
 
                     if st.button("Simpan Item SN", key=f"btn_sn_{item_id}", type="primary", use_container_width=True):
                         new_qty = 1 if new_check else 0
                         state_changed = (new_qty != row['fisik_qty'])
 
-                        # [v4.1] Validasi Keterangan
-                        if state_changed and not keterangan.strip():
-                            st.error("Wajib isi Keterangan karena status SN berubah (Koreksi data).")
-                            continue 
+                        # Jika status berubah ATAU keterangan diisi, kita proses.
+                        if state_changed:
+                            if not keterangan.strip():
+                                st.error("Wajib isi Keterangan karena status SN berubah (Koreksi data).")
+                                continue 
                         
-                        if not state_changed:
+                        if not state_changed and not keterangan.strip() and not current_notes.strip():
                             st.info("Tidak ada perubahan yang tersimpan.")
                             continue
-                            
+
                         updates, conflict = handle_update(row, new_qty, True, nama_user, loaded_time, keterangan.strip())
                         if not conflict and updates > 0:
                             st.toast(f"✅ SN {row['nama_barang']} disimpan!", icon="💾")
                             time.sleep(0.5)
                             st.rerun()
+                        elif not conflict:
+                            st.info("Tidak ada perubahan yang tersimpan.")
                             
     st.markdown("---")
 
@@ -362,14 +373,15 @@ def page_sales():
             item_id = row['id']
             
             default_qty = row['fisik_qty']
-            selisih = default_qty - row['system_qty']
+            selisih_sistem = default_qty - row['system_qty']
             
-            status_text = "MATCH" if selisih == 0 else ("LEBIH" if selisih > 0 else "KURANG")
-            status_color = "green" if selisih == 0 else "red"
+            status_text = "MATCH" if selisih_sistem == 0 else ("LEBIH" if selisih_sistem > 0 else "KURANG")
+            status_color = "green" if selisih_sistem == 0 else "red"
             
-            header_text = f"**{row['brand']}** | {row['nama_barang']} | Selisih: :{status_color}[{selisih}]"
+            header_text = f"**{row['brand']}** | {row['nama_barang']} | Selisih: :{status_color}[{selisih_sistem}]"
             
-            notes_key = f"notes_non_{item_id}" # [v4.1] Key baru untuk notes
+            notes_key = f"notes_non_{item_id}"
+            current_notes = row.get('keterangan', '')
             
             with st.expander(header_text, expanded=False):
                 col_info, col_input = st.columns([2, 1])
@@ -380,24 +392,22 @@ def page_sales():
                     st.markdown(f"**Dicek Oleh:** {row['updated_by']}")
                 
                 with col_input:
-                    # Input Angka Non-SN
                     new_qty = st.number_input("JML FISIK", value=default_qty, min_value=0, step=1, key=f"qty_non_{item_id}", label_visibility="collapsed")
                     
-                    # [v4.1] Input Keterangan
-                    keterangan = st.text_area("Keterangan/Isu (Jika Selisih Qty)", value="", key=notes_key, height=50)
+                    keterangan = st.text_area("Keterangan/Isu (Jika Selisih Qty)", value=current_notes, key=notes_key, height=50)
 
                     if st.button("Simpan Item Non-SN", key=f"btn_non_{item_id}", type="primary", use_container_width=True):
                         
-                        has_discrepancy = (new_qty != row['system_qty']) 
+                        has_discrepancy_vs_system = (new_qty != row['system_qty']) 
                         qty_changed_from_db = (new_qty != row['fisik_qty'])
 
-                        # [v4.1] Validasi Keterangan: Jika ada selisih vs Sistem, Keterangan wajib diisi.
-                        if has_discrepancy and not keterangan.strip():
+                        # Validasi Keterangan: Jika ada selisih vs Sistem, Keterangan wajib diisi.
+                        if has_discrepancy_vs_system and not keterangan.strip():
                             st.error("Wajib isi Keterangan karena ada Selisih antara Fisik dan Sistem.")
                             continue 
                         
-                        # Hanya update jika ada perubahan dari data yang terakhir disimpan (di DB)
-                        if not qty_changed_from_db:
+                        # Hanya update jika ada perubahan QTY dari DB ATAU perubahan Keterangan
+                        if not qty_changed_from_db and current_notes.strip() == keterangan.strip():
                              st.info("Tidak ada perubahan yang tersimpan.")
                              continue
 
@@ -406,9 +416,11 @@ def page_sales():
                             st.toast(f"✅ Qty {row['nama_barang']} disimpan!", icon="💾")
                             time.sleep(0.5)
                             st.rerun()
+                        elif not conflict:
+                            st.info("Tidak ada perubahan yang tersimpan.")
 
 
-# --- FUNGSI ADMIN ---
+# --- HALAMAN ADMIN ---
 def page_admin():
     st.title("🛡️ Admin Dashboard (v4.1)")
     active_session = get_active_session_info()
