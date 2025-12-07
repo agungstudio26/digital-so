@@ -6,12 +6,15 @@ import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 from postgrest.exceptions import APIError
+# [v4.7] Import untuk interaksi Local Storage
+from streamlit_js_eval import streamlit_js_eval, get_js_eval
 
-# --- KONFIGURASI [v4.6 - Progress QTY Based] ---
+# --- KONFIGURASI [v4.7 - Persistence Setting] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
 RESET_PIN = "123456" # PIN Reset
+PERSISTENCE_KEY = "so_checker_name" # Kunci untuk Local Storage
 
 if not SUPABASE_URL:
     st.error("⚠️ Konfigurasi Database Belum Ada.")
@@ -57,6 +60,21 @@ def convert_df_to_excel(df):
             length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
             worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
     return output.getvalue()
+
+# --- FUNGSI PERSISTENCE (LOCAL STORAGE) [v4.7] ---
+
+def get_saved_name():
+    """Membaca nama dari Local Storage"""
+    # Gunakan get_js_eval untuk menghindari reruns yang tidak perlu
+    # Mengambil nilai dari local storage saat load
+    js_code = f"localStorage.getItem('{PERSISTENCE_KEY}');"
+    return get_js_eval(js_code)
+
+def set_saved_name(name):
+    """Menyimpan nama ke Local Storage dan memicu rerun"""
+    js_code = f"localStorage.setItem('{PERSISTENCE_KEY}', '{name}');"
+    # Memastikan kode dijalankan tanpa memblokir
+    streamlit_js_eval(js_code=js_code, key='set_name_js', want_return_value=False)
 
 # --- FUNGSI HELPER DATABASE ---
 def get_active_session_info():
@@ -276,13 +294,30 @@ def page_sales():
     session_name = get_active_session_info()
     st.title(f"📱 SO: {session_name}")
     
+    # [v4.7] Mendapatkan nama yang tersimpan dari Local Storage
+    saved_name = get_saved_name() 
+    
+    # Menentukan index awal untuk Dropdown
+    opsi_sales = ["-- Silahkan Pilih Nama Petugas --"] + DAFTAR_SALES
+    try:
+        if saved_name and saved_name in DAFTAR_SALES:
+            default_index = opsi_sales.index(saved_name)
+        else:
+            default_index = 0
+    except ValueError:
+        default_index = 0 # Fallback jika nama tidak ditemukan
+
     with st.container():
         c_pemeriksa, c_owner, c_lokasi, c_jenis = st.columns([1, 1, 0.7, 0.7])
 
         with c_pemeriksa:
-            opsi_sales = ["-- Silahkan Pilih Nama Petugas --"] + DAFTAR_SALES
-            nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales)
-        
+            # [v4.7] Menggunakan default_index untuk Persistence
+            nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales, index=default_index, key="checker_select")
+            
+            # [v4.7] Menyimpan nama yang dipilih ke Local Storage
+            if nama_user != "-- Silahkan Pilih Nama Petugas --":
+                 set_saved_name(nama_user)
+
         with c_owner:
             st.caption("Sumber Barang:")
             owner_opt = st.radio(" ", ["Reguler", "Konsinyasi"], horizontal=True, label_visibility="collapsed")
@@ -336,7 +371,7 @@ def page_sales():
     st.markdown("---")
 
 
-    # [v4.6] LIST BARANG SN (Keterangan Opsional)
+    # [v4.4] LIST BARANG SN (Keterangan Opsional)
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)}) - {owner_filter}")
         
@@ -387,7 +422,7 @@ def page_sales():
                             
     st.markdown("---")
 
-    # [v4.6] LIST BARANG NON-SN (Keterangan Opsional)
+    # [v4.4] LIST BARANG NON-SN (Keterangan Opsional)
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)}) - {owner_filter}")
 
@@ -440,7 +475,7 @@ def page_sales():
 
 # --- FUNGSI ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v4.6)")
+    st.title("🛡️ Admin Dashboard (v4.7)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -494,7 +529,7 @@ def page_admin():
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
         st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge. File harus ada kolom 'Keterangan'.")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.6.xlsx")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.7.xlsx")
         
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data Offline"):
@@ -578,8 +613,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v4.6", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v4.6")
+    st.set_page_config(page_title="SO System v4.7", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v4.7")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
@@ -589,3 +624,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
