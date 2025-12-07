@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
 from supabase import create_client
-from datetime import datetime
+from datetime import datetime, timezone # [FIX v3.9] Import timezone
 import time
 import io
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- KONFIGURASI [v3.9 - Fix] ---
+# --- KONFIGURASI [v3.9 - Final Fix] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
@@ -21,6 +21,20 @@ def init_connection():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 supabase = init_connection()
+
+# --- FUNGSI HELPER WAKTU BARU ---
+def parse_supabase_timestamp(timestamp_str):
+    """Mengubah string timestamp Supabase menjadi objek datetime yang aman"""
+    try:
+        # Supabase menggunakan format ISO 8601, kita gunakan fromisoformat
+        # Handle jika ada 'Z' (UTC) atau jika timezone offset (e.g., +00:00)
+        if timestamp_str.endswith('Z'):
+             timestamp_str = timestamp_str[:-1] + '+00:00'
+        return datetime.fromisoformat(timestamp_str)
+    except Exception as e:
+        # Fallback jika parsing gagal (misal data lama)
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
 
 # --- FUNGSI HELPER EXCEL ---
 def convert_df_to_excel(df):
@@ -66,8 +80,8 @@ def get_data(lokasi=None, jenis=None, owner=None, search_term=None, only_active=
     if jenis: query = query.eq("jenis", jenis)
     if owner: query = query.eq("owner_category", owner)
     
-    # Ambil data dan catat waktu pengambilan data
-    start_time = datetime.now()
+    # Ambil data dan catat waktu pengambilan data (HARUS TIMEZONE AWARE!)
+    start_time = datetime.now(timezone.utc) # [FIX v3.9] Gunakan UTC
     response = query.order("nama_barang").execute()
     df = pd.DataFrame(response.data)
     
@@ -246,7 +260,7 @@ def page_sales():
 
     # Ambil data. Waktu dan data disimpan ke st.session_state['data_loaded_time'] dan ['current_df'] di dalam fungsi get_data
     df = get_data(lokasi, jenis, owner_filter, search_term=search_txt, only_active=True)
-    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1))
+    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, tzinfo=timezone.utc))
     
     if df.empty:
         st.info(f"Tidak ada data barang **{owner_filter}** di {lokasi}-{jenis}.")
@@ -285,11 +299,11 @@ def page_sales():
                 if original_checked != new_checked:
                     # Perubahan terdeteksi, lakukan cek konflik!
                     db_updated_at_str, updated_by_db = get_db_updated_at(row['id'])
-                    db_updated_at = datetime.fromisoformat(db_updated_at_str.replace('Z', '+00:00')) # Konversi ke datetime object
+                    db_updated_at = parse_supabase_timestamp(db_updated_at_str) # [FIX v3.9] Gunakan fungsi parse
                     
                     if db_updated_at > loaded_time:
                         # KONFLIK TERDETEKSI!
-                        st.error(f"⚠️ KONFLIK DATA di SN {row['serial_number']} ({row['nama_barang']})! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi input Anda.")
+                        st.error(f"⚠️ KONFLIK DATA di SN {row['serial_number']} ({row['nama_barang']})! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi input Anda.")
                         conflict_found = True
                         break # Stop proses simpan
                     
@@ -335,11 +349,11 @@ def page_sales():
                 if original_row['fisik_qty'] != row['fisik_qty']:
                     # Perubahan terdeteksi, lakukan cek konflik!
                     db_updated_at_str, updated_by_db = get_db_updated_at(row['id'])
-                    db_updated_at = datetime.fromisoformat(db_updated_at_str.replace('Z', '+00:00'))
+                    db_updated_at = parse_supabase_timestamp(db_updated_at_str) # [FIX v3.9] Gunakan fungsi parse
                     
                     if db_updated_at > loaded_time:
                         # KONFLIK TERDETEKSI!
-                        st.error(f"⚠️ KONFLIK DATA di {row['nama_barang']}! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi hitungan Anda.")
+                        st.error(f"⚠️ KONFLIK DATA di {row['nama_barang']}! Data ini baru saja diubah oleh {updated_by_db} pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon tekan **Refresh Data** dan ulangi hitungan Anda.")
                         conflict_found = True
                         break 
                         
@@ -477,14 +491,12 @@ def page_admin():
         st.subheader("🔥 Hapus Sesi Aktif")
         
         # [Final UI Fix - Tombol Pindah di bawah Checkbox] 
-        # Menggunakan satu kolom input dan menempatkan tombol di baris berikutnya.
+        # Menggunakan alur vertikal standar yang lebih andal.
 
         input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456", key="final_pin")
         
         # Checkbox di baris berikutnya
         st.session_state['confirm_reset_state'] = st.checkbox("Saya sadar data sesi ini akan hilang permanen.", key="final_check")
-        
-        st.write("") # Spacer ringan
         
         # Tombol di baris paling bawah, full width
         if st.button("🔥 HAPUS SESI INI", use_container_width=True):
