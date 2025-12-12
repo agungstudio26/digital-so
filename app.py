@@ -7,13 +7,14 @@ import io
 from openpyxl.styles import PatternFill, Font, Alignment
 from postgrest.exceptions import APIError
 
-# --- KONFIGURASI [v4.7 - Final Stable Fix] ---
+# --- KONFIGURASI [v4.8 - Auto-Submit & Quick Filter] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
 RESET_PIN = "123456" # PIN Reset
-# Kunci untuk session state persistence
 SESSION_KEY_CHECKER = "current_checker_name" 
+SESSION_KEY_SEARCH = "current_search_term"
+QUICK_BRANDS = ["SAMSUNG", "LG", "ACER", "MIDEA", "POLYTRON", "ASUS"]
 
 if not SUPABASE_URL:
     st.error("⚠️ Konfigurasi Database Belum Ada.")
@@ -108,36 +109,140 @@ def get_db_updated_at(id_barang):
     except Exception as e:
         return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM_ERROR"
 
-# --- FUNGSI ADMIN: PROSES DATA ---
-def delete_active_session():
-    try:
-        supabase.table("stock_opname").delete().eq("is_active", True).execute()
-        return True, "Sesi aktif berhasil dihapus total."
-    except Exception as e: return False, str(e)
+# --- FUNGSI UTAMA LOGIKA SIMPAN & CALLBACK ---
+def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
+    """Logika pemrosesan, cek konflik, dan update untuk satu baris data"""
+    id_barang = row['id']
+    updates_count = 0
+    conflict_found = False
 
-def start_new_session(df, session_name):
-    try:
-        supabase.table("stock_opname").update({"is_active": False}).eq("is_active", True).execute()
-        return process_and_insert(df, session_name)
-    except Exception as e: return False, str(e)
+    original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == id_barang]
+    
+    if original_row_match.empty:
+        st.error(f"Error: Item ID {id_barang} tidak ditemukan di sesi awal.")
+        return 0, True
 
-def add_to_current_session(df, current_session_name):
-    try:
-        return process_and_insert(df, current_session_name)
-    except Exception as e: return False, str(e)
+    original_row = original_row_match.iloc[0]
+    original_qty = original_row['fisik_qty']
+
+    original_notes = original_row.get('keterangan', '') if original_row.get('keterangan') is not None else ''
+    keterangan_to_save = keterangan if keterangan.strip() else None
+
+    is_qty_changed = (original_qty != new_qty)
+    is_notes_changed = (original_notes.strip() != (keterangan_to_save.strip() if keterangan_to_save else ''))
+
+    if is_qty_changed or is_notes_changed:
+        
+        db_updated_at_str, updated_by_db = get_db_updated_at(id_barang)
+        db_updated_at = parse_supabase_timestamp(db_updated_at_str)
+        
+        if db_updated_at > loaded_time:
+            st.error(f"⚠️ KONFLIK DATA: **{row['nama_barang']}**! Data diubah oleh **{updated_by_db}** pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon **Muat Ulang Data**.")
+            return 0, True
+
+        update_payload = {
+            "fisik_qty": new_qty, 
+            "updated_at": datetime.utcnow().isoformat(), 
+            "updated_by": nama_user,
+            "keterangan": keterangan_to_save
+        }
+
+        try:
+            supabase.table("stock_opname").update(update_payload).eq("id", id_barang).execute()
+            updates_count += 1
+        except APIError as api_e:
+            st.error(f"❌ Gagal Simpan Item {row['nama_barang']}. Mohon Cek Database/SKU. Detail: {api_e}")
+            return 0, True 
+        
+    return updates_count, conflict_found
+
+# [v4.8] Unified Callback for Fast Save
+def fast_save_callback(item_id, is_sn, notes_key, widget_key):
+    """Dipanggil saat checkbox atau number input berubah nilainya."""
+    
+    # 1. Pastikan data sesi lengkap
+    row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == item_id]
+    if row_match.empty:
+        st.error(f"Error: Item ID {item_id} tidak ditemukan untuk penyimpanan cepat.")
+        return
+        
+    row = row_match.iloc[0]
+    
+    # Dapatkan nilai dari Session State
+    nama_user = st.session_state.get(SESSION_KEY_CHECKER, "UNKNOWN")
+    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, tzinfo=timezone.utc))
+
+    if is_sn:
+        # Checkbox changes: widget_key holds boolean value
+        new_check = st.session_state[widget_key]
+        new_qty = 1 if new_check else 0
+    else:
+        # Number input changes: widget_key holds numeric value
+        new_qty = st.session_state[widget_key]
+
+    keterangan = st.session_state[notes_key] 
+
+    # 2. Panggil update handler
+    updates, conflict = handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan.strip())
+    
+    # 3. Beri feedback dan rerun jika sukses
+    if conflict:
+        # Error sudah ditampilkan di dalam handle_update
+        pass
+    elif updates > 0:
+        st.toast(f"✅ {row['nama_barang']} disimpan otomatis!", icon="💾")
+        st.cache_data.clear()
+        st.session_state.pop('current_df', None)
+        st.rerun()
+
+# --- FUNGSI ADMIN: PROSES DATA (Templates dihilangkan untuk brevity, tapi isinya sama) ---
+
+def get_master_template_excel():
+    data = {
+        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
+        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
+        'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
+        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
+        'Serial Number': ['SN123', '', ''],
+        'LOKASI': ['Floor', 'Gudang', 'Floor'],
+        'JENIS': ['Stok', 'Stok', 'Stok'],
+        'Quantity': [10, 100, 50]
+    }
+    df = pd.DataFrame(data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Template_Master')
+    return output.getvalue()
+
+def get_template_excel():
+    data = {
+        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
+        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
+        'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
+        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
+        'Serial Number': ['SN123', '', ''],
+        'LOKASI': ['Floor', 'Gudang', 'Floor'],
+        'JENIS': ['Stok', 'Stok', 'Stok'],
+        'Quantity': [10, 100, 50],
+        'Hitungan Fisik': [10, 98, 50],
+        'Keterangan': ['Hitungan Fisik Sesuai', 'Hilang 2 unit', '']
+    }
+    df = pd.DataFrame(data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Template_Master')
+    return output.getvalue()
+
 
 def process_and_insert(df, session_name):
     data_to_insert = []
     for _, row in df.iterrows():
         is_sn = pd.notna(row.get('Serial Number')) and str(row.get('Serial Number')).strip() != ''
-        
         owner_val = row.get('OWNER', 'Reguler') 
         if pd.isna(owner_val) or str(owner_val).strip() == '': owner_val = 'Reguler'
-        
         brand_val = row.get('BRAND', 'General')
         if pd.isna(brand_val) or str(brand_val).strip() == '': 
             brand_val = str(row.get('Product', '')).split()[0]
-
         item = {
             "sku": str(row.get('Internal Reference', '')),
             "nama_barang": row.get('Product', 'Unknown'),
@@ -152,7 +257,6 @@ def process_and_insert(df, session_name):
             "keterangan": None
         }
         data_to_insert.append(item)
-    
     batch_size = 500
     for i in range(0, len(data_to_insert), batch_size):
         supabase.table("stock_opname").insert(data_to_insert[i:i+batch_size]).execute()
@@ -177,129 +281,52 @@ def merge_offline_data(df):
             my_bar.progress((i + 1) / total_rows)
         return True, success_count
     except Exception as e: return False, str(e)
-
-def get_master_template_excel():
-    data = {
-        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
-        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
-        'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
-        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
-        'Serial Number': ['SN123', '', ''],
-        'LOKASI': ['Floor', 'Gudang', 'Floor'],
-        'JENIS': ['Stok', 'Stok', 'Stok'],
-        'Quantity': [10, 100, 50]
-    }
-    df = pd.DataFrame(data)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Template_Master')
-        worksheet = writer.sheets['Template_Master']
-        for column_cells in worksheet.columns:
-            length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
-            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
-    return output.getvalue()
-
-def get_template_excel():
-    data = {
-        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
-        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
-        'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
-        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
-        'Serial Number': ['SN123', '', ''],
-        'LOKASI': ['Floor', 'Gudang', 'Floor'],
-        'JENIS': ['Stok', 'Stok', 'Stok'],
-        'Quantity': [10, 100, 50],
-        'Hitungan Fisik': [10, 98, 50],
-        'Keterangan': ['Hitungan Fisik Sesuai', 'Hilang 2 unit', '']
-    }
-    df = pd.DataFrame(data)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Template_Master')
-        worksheet = writer.sheets['Template_Master']
-        for column_cells in worksheet.columns:
-            length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
-            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
-    return output.getvalue()
-
-
-# --- LOGIKA CARD VIEW & UPDATE ---
-
-def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
-    """Logika pemrosesan, cek konflik, dan update untuk satu baris data"""
-    id_barang = row['id']
-    updates_count = 0
-    conflict_found = False
-
-    original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == id_barang]
     
-    if original_row_match.empty:
-        st.error(f"Error: Item ID {id_barang} tidak ditemukan di sesi awal.")
-        return 0, True
+def delete_active_session():
+    try:
+        supabase.table("stock_opname").delete().eq("is_active", True).execute()
+        return True, "Sesi aktif berhasil dihapus total."
+    except Exception as e: return False, str(e)
 
-    original_row = original_row_match.iloc[0]
-    original_qty = original_row['fisik_qty']
+def start_new_session(df, session_name):
+    try:
+        supabase.table("stock_opname").update({"is_active": False}).eq("is_active", True).execute()
+        return process_and_insert(df, session_name)
+    except Exception as e: return False, str(e)
 
-    original_notes = original_row.get('keterangan', '') if original_row.get('keterangan') is not None else ''
-    keterangan_to_save = keterangan if keterangan.strip() else None
-
-    is_qty_changed = (original_qty != new_qty)
-    is_notes_changed = (original_notes.strip() != (keterangan_to_save.strip() if keterangan_to_save else ''))
-
-    if is_qty_changed or is_notes_changed:
-        
-        # Cek Konflik
-        db_updated_at_str, updated_by_db = get_db_updated_at(id_barang)
-        db_updated_at = parse_supabase_timestamp(db_updated_at_str)
-        
-        if db_updated_at > loaded_time:
-            st.error(f"⚠️ KONFLIK DATA: **{row['nama_barang']}**! Data diubah oleh **{updated_by_db}** pada {db_updated_at.astimezone(None).strftime('%H:%M:%S')}. Mohon **Muat Ulang Data**.")
-            return 0, True
-
-        # Lakukan Update
-        update_payload = {
-            "fisik_qty": new_qty, 
-            "updated_at": datetime.utcnow().isoformat(), 
-            "updated_by": nama_user,
-            "keterangan": keterangan_to_save
-        }
-
-        try:
-            supabase.table("stock_opname").update(update_payload).eq("id", id_barang).execute()
-            updates_count += 1
-        except APIError as api_e:
-            st.error(f"❌ Gagal Simpan Item {row['nama_barang']}. Mohon Cek Database/SKU. Detail: {api_e}")
-            return 0, True 
-        
-    return updates_count, conflict_found
+def add_to_current_session(df, current_session_name):
+    try:
+        return process_and_insert(df, current_session_name)
+    except Exception as e: return False, str(e)
 
 # --- HALAMAN SALES ---
 def page_sales():
     session_name = get_active_session_info()
     st.title(f"📱 SO: {session_name}")
     
-    # [v4.7] Inisialisasi session state untuk nama Sales
+    # [v4.7] Inisialisasi session state untuk nama Sales & Search Term
     if SESSION_KEY_CHECKER not in st.session_state:
         st.session_state[SESSION_KEY_CHECKER] = "-- Silahkan Pilih Nama Petugas --"
+    if SESSION_KEY_SEARCH not in st.session_state:
+        st.session_state[SESSION_KEY_SEARCH] = ""
     
     # Menentukan index awal untuk Dropdown
     opsi_sales = ["-- Silahkan Pilih Nama Petugas --"] + DAFTAR_SALES
     try:
         default_index = opsi_sales.index(st.session_state[SESSION_KEY_CHECKER])
     except ValueError:
-        default_index = 0 # Fallback jika nama tidak ditemukan
+        default_index = 0
 
     with st.container():
         c_pemeriksa, c_owner, c_lokasi, c_jenis = st.columns([1, 1, 0.7, 0.7])
 
         with c_pemeriksa:
-            # [v4.7] Dropdown menggunakan state management
             nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales, index=default_index, key="checker_select")
             
-            # [v4.7] Menyimpan pilihan ke session state setiap kali ada perubahan
             if nama_user != st.session_state[SESSION_KEY_CHECKER]:
                  st.session_state[SESSION_KEY_CHECKER] = nama_user
-                 st.rerun() # Rerun untuk update default value saat refresh/navigasi
+                 st.session_state[SESSION_KEY_SEARCH] = "" # Clear search saat ganti user/zona
+                 st.rerun()
 
         with c_owner:
             st.caption("Sumber Barang:")
@@ -316,21 +343,36 @@ def page_sales():
     
     st.divider()
     
-    # Mengambil nama dari state untuk digunakan di update
     final_nama_user = st.session_state[SESSION_KEY_CHECKER]
 
     if "Silahkan Pilih" in final_nama_user:
         st.info("👋 Halo! Untuk memulai Stock Opname, mohon **pilih nama Anda** terlebih dahulu di menu kiri atas.")
         st.stop()
         
-    search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...")
     
+    # [v4.8] QUICK FILTER BUTTONS
+    st.subheader("Filter Cepat (Brand Umum)")
+    cols_quick_filter = st.columns(len(QUICK_BRANDS))
+    for i, brand in enumerate(QUICK_BRANDS):
+        if cols_quick_filter[i].button(brand, key=f"quick_filter_{brand}"):
+            st.session_state[SESSION_KEY_SEARCH] = brand
+            st.rerun()
+            
+    # [v4.8] Search Input
+    search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...", 
+                               value=st.session_state[SESSION_KEY_SEARCH], 
+                               key='search_input_main')
+    
+    if st.session_state.search_input_main != st.session_state[SESSION_KEY_SEARCH]:
+        st.session_state[SESSION_KEY_SEARCH] = st.session_state.search_input_main
+        # No rerun here, let the normal flow handle the change
+
     if st.button("🔄 Muat Ulang Data"):
         st.cache_data.clear()
         st.session_state.pop('current_df', None)
         st.rerun()
 
-    df = get_data(lokasi, jenis, owner_filter, search_term=search_txt, only_active=True)
+    df = get_data(lokasi, jenis, owner_filter, search_term=st.session_state[SESSION_KEY_SEARCH], only_active=True)
     loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, tzinfo=timezone.utc))
     
     if df.empty:
@@ -340,7 +382,7 @@ def page_sales():
     df_sn = df[df['kategori_barang'] == 'SN'].copy()
     df_non = df[df['kategori_barang'] == 'NON-SN'].copy()
     
-    # [v4.6] Progress Monitoring - QTY Based
+    # Progress Monitoring - QTY Based
     total_qty_sistem = df['system_qty'].sum()
     total_qty_fisik_tercatat = df['fisik_qty'].sum()
     progress_percent = total_qty_fisik_tercatat / total_qty_sistem if total_qty_sistem > 0 else 0
@@ -357,7 +399,7 @@ def page_sales():
     st.markdown("---")
 
 
-    # [v4.4] LIST BARANG SN (Keterangan Opsional)
+    # [v4.8] LIST BARANG SN (Auto-Submit)
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)}) - {owner_filter}")
         
@@ -384,31 +426,24 @@ def page_sales():
                          st.markdown(f"**Catatan Sebelumnya:** `{current_notes}`")
                 
                 with col_input:
-                    new_check = st.checkbox("ADA FISIK?", value=is_checked, key=checkbox_key)
+                    # [v4.8] Checkbox with Auto-Submit
+                    new_check = st.checkbox("ADA FISIK?", 
+                                            value=is_checked, 
+                                            key=checkbox_key,
+                                            on_change=fast_save_callback,
+                                            args=(item_id, True, notes_key, checkbox_key))
                     
-                    keterangan = st.text_area("Keterangan/Isu (Opsional)", value=current_notes, key=notes_key, height=50)
-
-                    if st.button("Simpan Item SN", key=f"btn_sn_{item_id}", type="primary", use_container_width=True):
-                        new_qty = 1 if new_check else 0
-                        
-                        is_qty_changed = (new_qty != row['fisik_qty'])
-                        is_notes_changed = (current_notes.strip() != keterangan.strip())
-                        
-                        if not is_qty_changed and not is_notes_changed:
-                            st.info("Tidak ada perubahan yang tersimpan.")
-                            continue
-
-                        updates, conflict = handle_update(row, new_qty, True, final_nama_user, loaded_time, keterangan.strip())
-                        if not conflict and updates > 0:
-                            st.toast(f"✅ SN {row['nama_barang']} disimpan!", icon="💾")
-                            time.sleep(0.5)
-                            st.rerun()
-                        elif not conflict:
-                            st.info("Tidak ada perubahan yang tersimpan.")
+                    # [v4.8] Notes area also triggers Auto-Submit
+                    keterangan = st.text_area("Keterangan/Isu (Opsional)", 
+                                            value=current_notes, 
+                                            key=notes_key, 
+                                            height=50,
+                                            on_change=fast_save_callback,
+                                            args=(item_id, True, notes_key, checkbox_key))
                             
     st.markdown("---")
 
-    # [v4.4] LIST BARANG NON-SN (Keterangan Opsional)
+    # [v4.8] LIST BARANG NON-SN (Auto-Submit)
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)}) - {owner_filter}")
 
@@ -423,6 +458,7 @@ def page_sales():
             
             header_text = f"**{row['brand']}** | {row['nama_barang']} | Selisih: :{status_color}[{selisih_sistem}]"
             
+            qty_key = f"qty_non_{item_id}"
             notes_key = f"notes_non_{item_id}"
             current_notes = row.get('keterangan', '') if row.get('keterangan') is not None else ''
             
@@ -437,31 +473,28 @@ def page_sales():
                          st.markdown(f"**Catatan Sebelumnya:** `{current_notes}`")
                 
                 with col_input:
-                    new_qty = st.number_input("JML FISIK", value=default_qty, min_value=0, step=1, key=f"qty_non_{item_id}", label_visibility="collapsed")
+                    # [v4.8] Number Input with Auto-Submit
+                    new_qty = st.number_input("JML FISIK", 
+                                              value=default_qty, 
+                                              min_value=0, 
+                                              step=1, 
+                                              key=qty_key, 
+                                              label_visibility="collapsed",
+                                              on_change=fast_save_callback,
+                                              args=(item_id, False, notes_key, qty_key))
                     
-                    keterangan = st.text_area("Keterangan/Isu (Opsional)", value=current_notes, key=notes_key, height=50)
-
-                    if st.button("Simpan Item Non-SN", key=f"btn_non_{item_id}", type="primary", use_container_width=True):
-                        
-                        is_qty_changed = (new_qty != row['fisik_qty'])
-                        is_notes_changed = (current_notes.strip() != keterangan.strip())
-
-                        if not is_qty_changed and not is_notes_changed:
-                             st.info("Tidak ada perubahan yang tersimpan.")
-                             continue
-
-                        updates, conflict = handle_update(row, new_qty, False, final_nama_user, loaded_time, keterangan.strip())
-                        if not conflict and updates > 0:
-                            st.toast(f"✅ Qty {row['nama_barang']} disimpan!", icon="💾")
-                            time.sleep(0.5)
-                            st.rerun()
-                        elif not conflict:
-                            st.info("Tidak ada perubahan yang tersimpan.")
+                    # [v4.8] Notes area also triggers Auto-Submit
+                    keterangan = st.text_area("Keterangan/Isu (Opsional)", 
+                                              value=current_notes, 
+                                              key=notes_key, 
+                                              height=50,
+                                              on_change=fast_save_callback,
+                                              args=(item_id, False, notes_key, qty_key))
 
 
 # --- FUNGSI ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v4.7)")
+    st.title("🛡️ Admin Dashboard (v4.8)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -515,7 +548,7 @@ def page_admin():
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
         st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge. File harus ada kolom 'Keterangan'.")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.7.xlsx")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.8.xlsx")
         
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data Offline"):
@@ -599,8 +632,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v4.7", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v4.7")
+    st.set_page_config(page_title="SO System v4.8", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v4.8")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
