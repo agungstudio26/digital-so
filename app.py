@@ -7,10 +7,10 @@ import io
 from openpyxl.styles import PatternFill, Font, Alignment
 from postgrest.exceptions import APIError
 
-# --- KONFIGURASI [v4.8 - Auto-Submit & Quick Filter] ---
+# --- KONFIGURASI [v4.9 - Dynamic Operator List] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
-DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
+# DAFTAR_SALES dihilangkan, sekarang diambil dari DB
 RESET_PIN = "123456" # PIN Reset
 SESSION_KEY_CHECKER = "current_checker_name" 
 SESSION_KEY_SEARCH = "current_search_term"
@@ -37,7 +37,7 @@ def parse_supabase_timestamp(timestamp_str):
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 def convert_df_to_excel(df):
-    """Mengubah DataFrame menjadi file Excel dengan Header Cantik, termasuk Keterangan"""
+    """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         cols = ['batch_id', 'sku', 'brand', 'nama_barang', 'owner_category', 'lokasi', 'jenis', 'system_qty', 'fisik_qty', 'keterangan', 'updated_by', 'updated_at']
@@ -61,7 +61,47 @@ def convert_df_to_excel(df):
             worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
     return output.getvalue()
 
-# --- FUNGSI HELPER DATABASE ---
+# --- FUNGSI UTAMA OPERATOR MANAGEMENT [v4.9] ---
+
+def get_operator_list():
+    """Mengambil daftar operator aktif dari database."""
+    try:
+        # Ambil nama operator yang is_active=True
+        res = supabase.table("operator_list").select("nama").eq("is_active", True).order("nama").execute()
+        names = [item['nama'] for item in res.data]
+        
+        # Tambahkan Supervisor jika belum ada (safety)
+        if "Supervisor" not in names:
+             names.append("Supervisor")
+        return names
+    except Exception as e:
+        # Fallback jika tabel belum dibuat atau error koneksi
+        return ["DEFAULT_USER", "Supervisor"] 
+
+def add_operator(name):
+    """Menambahkan operator baru ke tabel operator_list."""
+    try:
+        # Insert dengan is_active=True secara default
+        supabase.table("operator_list").insert({"nama": name}).execute()
+        return True, f"Operator '{name}' berhasil ditambahkan."
+    except Exception as e:
+        # Handle duplikasi atau error database
+        if "duplicate key value violates unique constraint" in str(e):
+             return False, f"Gagal: Operator '{name}' sudah ada."
+        return False, str(e)
+
+def delete_operator(name):
+    """Menonaktifkan operator (soft delete)."""
+    if name == "Supervisor":
+        return False, "Tidak bisa menonaktifkan Supervisor."
+    try:
+        # Update is_active=False
+        supabase.table("operator_list").update({"is_active": False}).eq("nama", name).execute()
+        return True, f"Operator '{name}' berhasil dinonaktifkan."
+    except Exception as e:
+        return False, str(e)
+
+# --- FUNGSI HELPER DATABASE SO ---
 def get_active_session_info():
     try:
         res = supabase.table("stock_opname").select("batch_id").eq("is_active", True).limit(1).execute()
@@ -109,13 +149,11 @@ def get_db_updated_at(id_barang):
     except Exception as e:
         return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM_ERROR"
 
-# --- FUNGSI UTAMA LOGIKA SIMPAN & CALLBACK ---
+# --- FUNGSI UTAMA LOGIKA SIMPAN & CALLBACK (Sama seperti v4.8) ---
 def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
-    """Logika pemrosesan, cek konflik, dan update untuk satu baris data"""
     id_barang = row['id']
     updates_count = 0
     conflict_found = False
-
     original_row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == id_barang]
     
     if original_row_match.empty:
@@ -156,11 +194,8 @@ def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
         
     return updates_count, conflict_found
 
-# [v4.8] Unified Callback for Fast Save
 def fast_save_callback(item_id, is_sn, notes_key, widget_key):
-    """Dipanggil saat checkbox atau number input berubah nilainya."""
-    
-    # 1. Pastikan data sesi lengkap
+    """Dipanggil saat checkbox atau number input berubah nilainya (Auto-Submit)."""
     row_match = st.session_state['current_df'].loc[st.session_state['current_df']['id'] == item_id]
     if row_match.empty:
         st.error(f"Error: Item ID {item_id} tidak ditemukan untuk penyimpanan cepat.")
@@ -168,26 +203,20 @@ def fast_save_callback(item_id, is_sn, notes_key, widget_key):
         
     row = row_match.iloc[0]
     
-    # Dapatkan nilai dari Session State
     nama_user = st.session_state.get(SESSION_KEY_CHECKER, "UNKNOWN")
-    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, tzinfo=timezone.utc))
+    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, timezone.utc))
 
     if is_sn:
-        # Checkbox changes: widget_key holds boolean value
         new_check = st.session_state[widget_key]
         new_qty = 1 if new_check else 0
     else:
-        # Number input changes: widget_key holds numeric value
         new_qty = st.session_state[widget_key]
 
     keterangan = st.session_state[notes_key] 
 
-    # 2. Panggil update handler
     updates, conflict = handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan.strip())
     
-    # 3. Beri feedback dan rerun jika sukses
     if conflict:
-        # Error sudah ditampilkan di dalam handle_update
         pass
     elif updates > 0:
         st.toast(f"✅ {row['nama_barang']} disimpan otomatis!", icon="💾")
@@ -195,44 +224,23 @@ def fast_save_callback(item_id, is_sn, notes_key, widget_key):
         st.session_state.pop('current_df', None)
         st.rerun()
 
-# --- FUNGSI ADMIN: PROSES DATA (Templates dihilangkan untuk brevity, tapi isinya sama) ---
+# --- FUNGSI ADMIN: PROSES DATA (Insert, Merge, Delete) ---
+def delete_active_session():
+    try:
+        supabase.table("stock_opname").delete().eq("is_active", True).execute()
+        return True, "Sesi aktif berhasil dihapus total."
+    except Exception as e: return False, str(e)
 
-def get_master_template_excel():
-    data = {
-        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
-        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
-        'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
-        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
-        'Serial Number': ['SN123', '', ''],
-        'LOKASI': ['Floor', 'Gudang', 'Floor'],
-        'JENIS': ['Stok', 'Stok', 'Stok'],
-        'Quantity': [10, 100, 50]
-    }
-    df = pd.DataFrame(data)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Template_Master')
-    return output.getvalue()
+def start_new_session(df, session_name):
+    try:
+        supabase.table("stock_opname").update({"is_active": False}).eq("is_active", True).execute()
+        return process_and_insert(df, session_name)
+    except Exception as e: return False, str(e)
 
-def get_template_excel():
-    data = {
-        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
-        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
-        'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
-        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
-        'Serial Number': ['SN123', '', ''],
-        'LOKASI': ['Floor', 'Gudang', 'Floor'],
-        'JENIS': ['Stok', 'Stok', 'Stok'],
-        'Quantity': [10, 100, 50],
-        'Hitungan Fisik': [10, 98, 50],
-        'Keterangan': ['Hitungan Fisik Sesuai', 'Hilang 2 unit', '']
-    }
-    df = pd.DataFrame(data)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Template_Master')
-    return output.getvalue()
-
+def add_to_current_session(df, current_session_name):
+    try:
+        return process_and_insert(df, current_session_name)
+    except Exception as e: return False, str(e)
 
 def process_and_insert(df, session_name):
     data_to_insert = []
@@ -281,37 +289,64 @@ def merge_offline_data(df):
             my_bar.progress((i + 1) / total_rows)
         return True, success_count
     except Exception as e: return False, str(e)
-    
-def delete_active_session():
-    try:
-        supabase.table("stock_opname").delete().eq("is_active", True).execute()
-        return True, "Sesi aktif berhasil dihapus total."
-    except Exception as e: return False, str(e)
 
-def start_new_session(df, session_name):
-    try:
-        supabase.table("stock_opname").update({"is_active": False}).eq("is_active", True).execute()
-        return process_and_insert(df, session_name)
-    except Exception as e: return False, str(e)
+def get_master_template_excel():
+    data = {
+        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
+        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
+        'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
+        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
+        'Serial Number': ['SN123', '', ''],
+        'LOKASI': ['Floor', 'Gudang', 'Floor'],
+        'JENIS': ['Stok', 'Stok', 'Stok'],
+        'Quantity': [10, 100, 50]
+    }
+    df = pd.DataFrame(data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Template_Master')
+        worksheet = writer.sheets['Template_Master']
+        for column_cells in worksheet.columns:
+            length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
+    return output.getvalue()
 
-def add_to_current_session(df, current_session_name):
-    try:
-        return process_and_insert(df, current_session_name)
-    except Exception as e: return False, str(e)
+def get_template_excel():
+    data = {
+        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
+        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
+        'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
+        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
+        'Serial Number': ['SN123', '', ''],
+        'LOKASI': ['Floor', 'Gudang', 'Floor'],
+        'JENIS': ['Stok', 'Stok', 'Stok'],
+        'Quantity': [10, 100, 50],
+        'Hitungan Fisik': [10, 98, 50]
+    }
+    df = pd.DataFrame(data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Template_Master')
+        worksheet = writer.sheets['Template_Master']
+        for column_cells in worksheet.columns:
+            length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
+    return output.getvalue()
 
 # --- HALAMAN SALES ---
 def page_sales():
     session_name = get_active_session_info()
     st.title(f"📱 SO: {session_name}")
     
-    # [v4.7] Inisialisasi session state untuk nama Sales & Search Term
+    # [v4.9] Fetch operator list
+    DAFTAR_SALES_DB = get_operator_list() 
+
     if SESSION_KEY_CHECKER not in st.session_state:
         st.session_state[SESSION_KEY_CHECKER] = "-- Silahkan Pilih Nama Petugas --"
     if SESSION_KEY_SEARCH not in st.session_state:
         st.session_state[SESSION_KEY_SEARCH] = ""
     
-    # Menentukan index awal untuk Dropdown
-    opsi_sales = ["-- Silahkan Pilih Nama Petugas --"] + DAFTAR_SALES
+    opsi_sales = ["-- Silahkan Pilih Nama Petugas --"] + DAFTAR_SALES_DB
     try:
         default_index = opsi_sales.index(st.session_state[SESSION_KEY_CHECKER])
     except ValueError:
@@ -321,11 +356,12 @@ def page_sales():
         c_pemeriksa, c_owner, c_lokasi, c_jenis = st.columns([1, 1, 0.7, 0.7])
 
         with c_pemeriksa:
+            # Dropdown kini menggunakan list dari DB
             nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales, index=default_index, key="checker_select")
             
             if nama_user != st.session_state[SESSION_KEY_CHECKER]:
                  st.session_state[SESSION_KEY_CHECKER] = nama_user
-                 st.session_state[SESSION_KEY_SEARCH] = "" # Clear search saat ganti user/zona
+                 st.session_state[SESSION_KEY_SEARCH] = ""
                  st.rerun()
 
         with c_owner:
@@ -365,7 +401,6 @@ def page_sales():
     
     if st.session_state.search_input_main != st.session_state[SESSION_KEY_SEARCH]:
         st.session_state[SESSION_KEY_SEARCH] = st.session_state.search_input_main
-        # No rerun here, let the normal flow handle the change
 
     if st.button("🔄 Muat Ulang Data"):
         st.cache_data.clear()
@@ -373,7 +408,7 @@ def page_sales():
         st.rerun()
 
     df = get_data(lokasi, jenis, owner_filter, search_term=st.session_state[SESSION_KEY_SEARCH], only_active=True)
-    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, tzinfo=timezone.utc))
+    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, timezone.utc))
     
     if df.empty:
         st.info(f"Tidak ada data barang **{owner_filter}** di {lokasi}-{jenis}.")
@@ -399,7 +434,7 @@ def page_sales():
     st.markdown("---")
 
 
-    # [v4.8] LIST BARANG SN (Auto-Submit)
+    # LIST BARANG SN (Auto-Submit)
     if not df_sn.empty:
         st.subheader(f"📋 SN ({len(df_sn)}) - {owner_filter}")
         
@@ -426,14 +461,14 @@ def page_sales():
                          st.markdown(f"**Catatan Sebelumnya:** `{current_notes}`")
                 
                 with col_input:
-                    # [v4.8] Checkbox with Auto-Submit
+                    # Checkbox with Auto-Submit
                     new_check = st.checkbox("ADA FISIK?", 
                                             value=is_checked, 
                                             key=checkbox_key,
                                             on_change=fast_save_callback,
                                             args=(item_id, True, notes_key, checkbox_key))
                     
-                    # [v4.8] Notes area also triggers Auto-Submit
+                    # Notes area also triggers Auto-Submit
                     keterangan = st.text_area("Keterangan/Isu (Opsional)", 
                                             value=current_notes, 
                                             key=notes_key, 
@@ -443,7 +478,7 @@ def page_sales():
                             
     st.markdown("---")
 
-    # [v4.8] LIST BARANG NON-SN (Auto-Submit)
+    # LIST BARANG NON-SN (Auto-Submit)
     if not df_non.empty:
         st.subheader(f"📦 Non-SN ({len(df_non)}) - {owner_filter}")
 
@@ -473,7 +508,7 @@ def page_sales():
                          st.markdown(f"**Catatan Sebelumnya:** `{current_notes}`")
                 
                 with col_input:
-                    # [v4.8] Number Input with Auto-Submit
+                    # Number Input with Auto-Submit
                     new_qty = st.number_input("JML FISIK", 
                                               value=default_qty, 
                                               min_value=0, 
@@ -483,7 +518,7 @@ def page_sales():
                                               on_change=fast_save_callback,
                                               args=(item_id, False, notes_key, qty_key))
                     
-                    # [v4.8] Notes area also triggers Auto-Submit
+                    # Notes area also triggers Auto-Submit
                     keterangan = st.text_area("Keterangan/Isu (Opsional)", 
                                               value=current_notes, 
                                               key=notes_key, 
@@ -492,9 +527,9 @@ def page_sales():
                                               args=(item_id, False, notes_key, qty_key))
 
 
-# --- FUNGSI ADMIN ---
+# --- HALAMAN ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v4.8)")
+    st.title("🛡️ Admin Dashboard (v4.9)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -502,7 +537,8 @@ def page_admin():
     else:
         st.info(f"📅 Sesi Aktif: **{active_session}**")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["🚀 Master Data", "📥 Upload Offline", "🗄️ Laporan Akhir", "⚠️ Danger Zone"])
+    # [v4.9] Tab 4 diubah menjadi Manajemen Operator dan Reset
+    tab1, tab2, tab3, tab4 = st.tabs(["🚀 Master Data", "📥 Upload Offline", "🗄️ Laporan Akhir", "👥 Operator & Reset"])
     
     with tab1:
         st.write("---")
@@ -547,8 +583,8 @@ def page_admin():
 
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
-        st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge. File harus ada kolom 'Keterangan'.")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.8.xlsx")
+        st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge.")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.9.xlsx")
         
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data Offline"):
@@ -582,7 +618,7 @@ def page_admin():
             c2.metric("Milik Toko", reguler_count)
             c3.metric("Milik Vendor (Konsinyasi)", konsin_count)
             
-            st.dataframe(df[['sku', 'nama_barang', 'system_qty', 'fisik_qty', 'keterangan', 'updated_by', 'updated_at']])
+            st.dataframe(df)
             
             st.markdown("### 📥 Download Laporan (Terpisah)")
             tgl = datetime.now().strftime('%Y-%m-%d')
@@ -601,39 +637,72 @@ def page_admin():
                 else: st.caption("Data Konsinyasi Kosong")
 
     with tab4:
-        st.header("⚠️ DANGER ZONE")
-        st.error("Area Berbahaya. Tindakan di sini bersifat permanen.")
+        st.header("👥 Manajemen Operator")
+        st.caption("Tambahkan atau nonaktifkan Sales/Checker tanpa mengubah kode. Membutuhkan tabel 'operator_list'.")
+
+        # --- Sub-section 1: Add Operator ---
+        with st.form("add_operator_form"):
+            new_operator_name = st.text_input("Nama Operator Baru (Wajib Unik)", placeholder="Contoh: Budi Satria")
+            submit_add = st.form_submit_button("➕ Tambah Operator")
+            if submit_add and new_operator_name:
+                ok, msg = add_operator(new_operator_name.strip())
+                if ok: st.success(msg); time.sleep(1); st.rerun()
+                else: st.error(msg)
+
+        # --- Sub-section 2: List and Delete ---
+        st.subheader("Daftar Operator Aktif")
+        try:
+            operator_data = supabase.table("operator_list").select("nama, is_active").eq("is_active", True).order("nama").execute().data
+            operator_df = pd.DataFrame(operator_data)
+        except Exception:
+            operator_df = pd.DataFrame()
+            st.warning("Tabel 'operator_list' belum ditemukan di database. Harap jalankan script SQL yang disediakan.")
+
+        if not operator_df.empty:
+            st.dataframe(operator_df[['nama']], use_container_width=True, hide_index=True)
+
+            opsi_hapus = operator_df['nama'].tolist()
+            if opsi_hapus:
+                operator_to_delete = st.selectbox("Pilih Operator untuk Dinonaktifkan", opsi_hapus)
+                
+                if st.button(f"❌ Nonaktifkan {operator_to_delete}", type="secondary"):
+                    ok, msg = delete_operator(operator_to_delete)
+                    if ok: st.success(msg); time.sleep(1); st.rerun()
+                    else: st.error(msg)
+        else:
+            st.info("Tidak ada operator aktif yang terdaftar.")
+            
+        st.markdown("---")
         
-        st.markdown("""
-        **Fungsi Reset Sesi Aktif:**
-        - Menghapus **SELURUH** data pada sesi yang sedang berjalan.
-        - Tidak membuat arsip/backup.
-        - Gunakan hanya jika Anda salah upload master data dan ingin memulai ulang dari nol.
-        """)
+        # --- Sub-section 3: Danger Zone (Hard Reset) ---
+        st.header("⚠️ DANGER ZONE (Reset Data Sesi)")
+        st.error("Menghapus SELURUH data pada sesi aktif saat ini.")
         
-        st.divider()
-        st.subheader("🔥 Hapus Sesi Aktif")
+        dz_col1, dz_col2 = st.columns([3, 1]) 
         
-        input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456", key="final_pin")
+        with dz_col1:
+            input_pin = st.text_input("Masukkan PIN Keamanan", type="password", placeholder="PIN Standar: 123456", key="final_pin")
+            confirm_reset = st.checkbox("Saya sadar data sesi ini akan hilang permanen.")
         
-        st.session_state['confirm_reset_state'] = st.checkbox("Saya sadar data sesi ini akan hilang permanen.", key="final_check")
-        
-        if st.button("🔥 HAPUS SESI INI", use_container_width=True):
-            if input_pin == RESET_PIN:
-                if st.session_state.get('confirm_reset_state', False): 
-                    with st.spinner("Menghapus Sesi Aktif..."):
-                        ok, msg = delete_active_session()
-                        if ok: st.success("Sesi berhasil di-reset!"); time.sleep(2); st.rerun()
-                        else: st.error(f"Gagal: {msg}")
+        with dz_col2:
+            st.text("") 
+            st.write("") 
+            if st.button("🔥 HAPUS SESI INI", use_container_width=True):
+                if input_pin == RESET_PIN:
+                    if confirm_reset:
+                        with st.spinner("Menghapus Sesi Aktif..."):
+                            ok, msg = delete_active_session()
+                            if ok: st.success("Sesi berhasil di-reset!"); time.sleep(2); st.rerun()
+                            else: st.error(f"Gagal: {msg}")
+                    else:
+                        st.error("Harap centang konfirmasi dulu.")
                 else:
-                    st.error("Harap centang konfirmasi dulu.")
-            else:
-                st.error("PIN Salah.")
+                    st.error("PIN Salah.")
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v4.8", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v4.8")
+    st.set_page_config(page_title="SO System v4.9", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v4.9")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
