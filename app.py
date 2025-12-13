@@ -7,10 +7,10 @@ import io
 from openpyxl.styles import PatternFill, Font, Alignment
 from postgrest.exceptions import APIError
 
-# --- KONFIGURASI [v4.9 - Dynamic Operator List] ---
+# --- KONFIGURASI [v4.9 - Final Fix] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
-# DAFTAR_SALES dihilangkan, sekarang diambil dari DB
+DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
 RESET_PIN = "123456" # PIN Reset
 SESSION_KEY_CHECKER = "current_checker_name" 
 SESSION_KEY_SEARCH = "current_search_term"
@@ -32,12 +32,12 @@ def parse_supabase_timestamp(timestamp_str):
     try:
         if timestamp_str and timestamp_str.endswith('Z'):
              timestamp_str = timestamp_str[:-1] + '+00:00'
-        return datetime.fromisoformat(timestamp_str) if timestamp_str else datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return datetime.fromisoformat(timestamp_str) if timestamp_str else datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc) # FIX 1
     except Exception as e:
-        return datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc) # FIX 2
 
 def convert_df_to_excel(df):
-    """Mengubah DataFrame menjadi file Excel dengan Header Cantik"""
+    """Mengubah DataFrame menjadi file Excel dengan Header Cantik, termasuk Keterangan"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         cols = ['batch_id', 'sku', 'brand', 'nama_barang', 'owner_category', 'lokasi', 'jenis', 'system_qty', 'fisik_qty', 'keterangan', 'updated_by', 'updated_at']
@@ -66,26 +66,21 @@ def convert_df_to_excel(df):
 def get_operator_list():
     """Mengambil daftar operator aktif dari database."""
     try:
-        # Ambil nama operator yang is_active=True
         res = supabase.table("operator_list").select("nama").eq("is_active", True).order("nama").execute()
         names = [item['nama'] for item in res.data]
         
-        # Tambahkan Supervisor jika belum ada (safety)
         if "Supervisor" not in names:
              names.append("Supervisor")
         return names
     except Exception as e:
-        # Fallback jika tabel belum dibuat atau error koneksi
         return ["DEFAULT_USER", "Supervisor"] 
 
 def add_operator(name):
     """Menambahkan operator baru ke tabel operator_list."""
     try:
-        # Insert dengan is_active=True secara default
         supabase.table("operator_list").insert({"nama": name}).execute()
         return True, f"Operator '{name}' berhasil ditambahkan."
     except Exception as e:
-        # Handle duplikasi atau error database
         if "duplicate key value violates unique constraint" in str(e):
              return False, f"Gagal: Operator '{name}' sudah ada."
         return False, str(e)
@@ -95,7 +90,6 @@ def delete_operator(name):
     if name == "Supervisor":
         return False, "Tidak bisa menonaktifkan Supervisor."
     try:
-        # Update is_active=False
         supabase.table("operator_list").update({"is_active": False}).eq("nama", name).execute()
         return True, f"Operator '{name}' berhasil dinonaktifkan."
     except Exception as e:
@@ -144,10 +138,10 @@ def get_db_updated_at(id_barang):
             data = res.data[0]
             return data.get('updated_at'), data.get('updated_by')
         else:
-            return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM"
+            return datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(), "SYSTEM"
             
     except Exception as e:
-        return datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(), "SYSTEM_ERROR"
+        return datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(), "SYSTEM_ERROR"
 
 # --- FUNGSI UTAMA LOGIKA SIMPAN & CALLBACK (Sama seperti v4.8) ---
 def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
@@ -204,7 +198,7 @@ def fast_save_callback(item_id, is_sn, notes_key, widget_key):
     row = row_match.iloc[0]
     
     nama_user = st.session_state.get(SESSION_KEY_CHECKER, "UNKNOWN")
-    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, timezone.utc))
+    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc)) # FIX: use full signature
 
     if is_sn:
         new_check = st.session_state[widget_key]
@@ -224,24 +218,7 @@ def fast_save_callback(item_id, is_sn, notes_key, widget_key):
         st.session_state.pop('current_df', None)
         st.rerun()
 
-# --- FUNGSI ADMIN: PROSES DATA (Insert, Merge, Delete) ---
-def delete_active_session():
-    try:
-        supabase.table("stock_opname").delete().eq("is_active", True).execute()
-        return True, "Sesi aktif berhasil dihapus total."
-    except Exception as e: return False, str(e)
-
-def start_new_session(df, session_name):
-    try:
-        supabase.table("stock_opname").update({"is_active": False}).eq("is_active", True).execute()
-        return process_and_insert(df, session_name)
-    except Exception as e: return False, str(e)
-
-def add_to_current_session(df, current_session_name):
-    try:
-        return process_and_insert(df, current_session_name)
-    except Exception as e: return False, str(e)
-
+# --- FUNGSI ADMIN: PROSES DATA (Templates, Insert, Merge, Delete) ---
 def process_and_insert(df, session_name):
     data_to_insert = []
     for _, row in df.iterrows():
@@ -289,48 +266,49 @@ def merge_offline_data(df):
             my_bar.progress((i + 1) / total_rows)
         return True, success_count
     except Exception as e: return False, str(e)
+    
+def delete_active_session():
+    try:
+        supabase.table("stock_opname").delete().eq("is_active", True).execute()
+        return True, "Sesi aktif berhasil dihapus total."
+    except Exception as e: return False, str(e)
+
+def start_new_session(df, session_name):
+    try:
+        supabase.table("stock_opname").update({"is_active": False}).eq("is_active", True).execute()
+        return process_and_insert(df, session_name)
+    except Exception as e: return False, str(e)
+
+def add_to_current_session(df, current_session_name):
+    try:
+        return process_and_insert(df, current_session_name)
+    except Exception as e: return False, str(e)
 
 def get_master_template_excel():
     data = {
-        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
-        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
+        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'], 'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
         'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
-        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
-        'Serial Number': ['SN123', '', ''],
-        'LOKASI': ['Floor', 'Gudang', 'Floor'],
-        'JENIS': ['Stok', 'Stok', 'Stok'],
-        'Quantity': [10, 100, 50]
+        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'], 'Serial Number': ['SN123', '', ''],
+        'LOKASI': ['Floor', 'Gudang', 'Floor'], 'JENIS': ['Stok', 'Stok', 'Stok'], 'Quantity': [10, 100, 50]
     }
     df = pd.DataFrame(data)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Template_Master')
-        worksheet = writer.sheets['Template_Master']
-        for column_cells in worksheet.columns:
-            length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
-            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
     return output.getvalue()
 
 def get_template_excel():
     data = {
-        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'],
-        'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
+        'Internal Reference': ['SAM-S24', 'VIV-CBL-01', 'TITIP-CASE-01'], 'BRAND': ['SAMSUNG', 'VIVAN', 'ROBOT'],
         'Product': ['Samsung Galaxy S24', 'Vivan Kabel C', 'Robot Casing (Titipan)'],
-        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'],
-        'Serial Number': ['SN123', '', ''],
-        'LOKASI': ['Floor', 'Gudang', 'Floor'],
-        'JENIS': ['Stok', 'Stok', 'Stok'],
-        'Quantity': [10, 100, 50],
-        'Hitungan Fisik': [10, 98, 50]
+        'OWNER': ['Reguler', 'Reguler', 'Konsinyasi'], 'Serial Number': ['SN123', '', ''],
+        'LOKASI': ['Floor', 'Gudang', 'Floor'], 'JENIS': ['Stok', 'Stok', 'Stok'],
+        'Quantity': [10, 100, 50], 'Hitungan Fisik': [10, 98, 50]
     }
     df = pd.DataFrame(data)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Template_Master')
-        worksheet = writer.sheets['Template_Master']
-        for column_cells in worksheet.columns:
-            length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
-            worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
     return output.getvalue()
 
 # --- HALAMAN SALES ---
@@ -338,7 +316,6 @@ def page_sales():
     session_name = get_active_session_info()
     st.title(f"📱 SO: {session_name}")
     
-    # [v4.9] Fetch operator list
     DAFTAR_SALES_DB = get_operator_list() 
 
     if SESSION_KEY_CHECKER not in st.session_state:
@@ -356,7 +333,6 @@ def page_sales():
         c_pemeriksa, c_owner, c_lokasi, c_jenis = st.columns([1, 1, 0.7, 0.7])
 
         with c_pemeriksa:
-            # Dropdown kini menggunakan list dari DB
             nama_user = st.selectbox("👤 Nama Pemeriksa", opsi_sales, index=default_index, key="checker_select")
             
             if nama_user != st.session_state[SESSION_KEY_CHECKER]:
@@ -408,7 +384,7 @@ def page_sales():
         st.rerun()
 
     df = get_data(lokasi, jenis, owner_filter, search_term=st.session_state[SESSION_KEY_SEARCH], only_active=True)
-    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, timezone.utc))
+    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc)) # FIX: use full signature
     
     if df.empty:
         st.info(f"Tidak ada data barang **{owner_filter}** di {lokasi}-{jenis}.")
@@ -537,7 +513,7 @@ def page_admin():
     else:
         st.info(f"📅 Sesi Aktif: **{active_session}**")
     
-    # [v4.9] Tab 4 diubah menjadi Manajemen Operator dan Reset
+    # Tab 4 diubah menjadi Manajemen Operator dan Reset
     tab1, tab2, tab3, tab4 = st.tabs(["🚀 Master Data", "📥 Upload Offline", "🗄️ Laporan Akhir", "👥 Operator & Reset"])
     
     with tab1:
