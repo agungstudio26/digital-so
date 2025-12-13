@@ -7,14 +7,14 @@ import io
 from openpyxl.styles import PatternFill, Font, Alignment
 from postgrest.exceptions import APIError
 
-# --- KONFIGURASI [v5.0 - Dynamic Quick Filter] ---
+# --- KONFIGURASI [v5.0 - Tanpa Quick Filter] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
 RESET_PIN = "123456" # PIN Reset
 SESSION_KEY_CHECKER = "current_checker_name" 
 SESSION_KEY_SEARCH = "current_search_term"
-# QUICK_BRANDS Hardcoded Dihapus, diganti fungsi get_quick_brand_list()
+# QUICK_BRANDS dan logika dinamis dihilangkan total.
 
 if not SUPABASE_URL:
     st.error("⚠️ Konfigurasi Database Belum Ada.")
@@ -61,7 +61,7 @@ def convert_df_to_excel(df):
             worksheet.column_dimensions[column_cells[0].column_letter].width = length + 5
     return output.getvalue()
 
-# --- FUNGSI UTAMA OPERATOR MANAGEMENT [v4.9] ---
+# --- FUNGSI UTAMA OPERATOR MANAGEMENT ---
 
 def get_operator_list():
     """Mengambil daftar operator aktif dari database."""
@@ -94,24 +94,6 @@ def delete_operator(name):
         return True, f"Operator '{name}' berhasil dinonaktifkan."
     except Exception as e:
         return False, str(e)
-
-# [v5.0] FUNGSI BARU: Mendapatkan Daftar Merek Dinamis
-def get_quick_brand_list():
-    """Mengambil 6 merek teratas dari data aktif untuk Quick Filter."""
-    try:
-        # Ambil semua merek dari data aktif
-        res = supabase.table("stock_opname").select("brand").eq("is_active", True).execute()
-        df = pd.DataFrame(res.data)
-        
-        if df.empty:
-            return []
-            
-        # Hitung frekuensi merek (Value_counts) dan ambil 6 teratas, ubah ke list
-        top_brands = df['brand'].str.upper().value_counts().nlargest(6).index.tolist()
-        return top_brands
-    except Exception as e:
-        # Fallback jika terjadi error database, gunakan merek umum
-        return ["SAMSUNG", "LG", "ACER"] 
 
 # --- FUNGSI HELPER DATABASE SO ---
 def get_active_session_info():
@@ -380,22 +362,10 @@ def page_sales():
         st.stop()
         
     
-    # [v5.0] QUICK FILTER BUTTONS DINAMIS
-    QUICK_BRANDS_DYNAMIC = get_quick_brand_list() # Ambil merek dinamis
-    st.subheader("Filter Cepat (Merek Aktif)")
-    
-    if QUICK_BRANDS_DYNAMIC:
-        # Gunakan list merek dinamis untuk tombol
-        cols_quick_filter = st.columns(len(QUICK_BRANDS_DYNAMIC))
-        for i, brand in enumerate(QUICK_BRANDS_DYNAMIC):
-            if cols_quick_filter[i].button(brand, key=f"quick_filter_{brand}"):
-                st.session_state[SESSION_KEY_SEARCH] = brand
-                st.rerun()
-    else:
-        st.info("Tidak ada data merek aktif di sesi ini untuk filter cepat.")
-            
+    # [v5.0] QUICK FILTER BUTTONS DIHAPUS
+
     # [v4.8] Search Input
-    search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...", 
+    search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama/SKU)", placeholder="Contoh: Samsung, Robot, atau SKU barang...", 
                                value=st.session_state[SESSION_KEY_SEARCH], 
                                key='search_input_main')
     
