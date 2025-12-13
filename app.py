@@ -7,14 +7,14 @@ import io
 from openpyxl.styles import PatternFill, Font, Alignment
 from postgrest.exceptions import APIError
 
-# --- KONFIGURASI [v4.9 - Final Fix] ---
+# --- KONFIGURASI [v5.0 - Dynamic Quick Filter] ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else ""
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else ""
 DAFTAR_SALES = ["Agung", "Al Fath", "Reza", "Rico", "Sasa", "Mita", "Supervisor"]
 RESET_PIN = "123456" # PIN Reset
 SESSION_KEY_CHECKER = "current_checker_name" 
 SESSION_KEY_SEARCH = "current_search_term"
-QUICK_BRANDS = ["SAMSUNG", "LG", "ACER", "MIDEA", "POLYTRON", "ASUS"]
+# QUICK_BRANDS Hardcoded Dihapus, diganti fungsi get_quick_brand_list()
 
 if not SUPABASE_URL:
     st.error("⚠️ Konfigurasi Database Belum Ada.")
@@ -32,9 +32,9 @@ def parse_supabase_timestamp(timestamp_str):
     try:
         if timestamp_str and timestamp_str.endswith('Z'):
              timestamp_str = timestamp_str[:-1] + '+00:00'
-        return datetime.fromisoformat(timestamp_str) if timestamp_str else datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc) # FIX 1
+        return datetime.fromisoformat(timestamp_str) if timestamp_str else datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     except Exception as e:
-        return datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc) # FIX 2
+        return datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 def convert_df_to_excel(df):
     """Mengubah DataFrame menjadi file Excel dengan Header Cantik, termasuk Keterangan"""
@@ -95,6 +95,24 @@ def delete_operator(name):
     except Exception as e:
         return False, str(e)
 
+# [v5.0] FUNGSI BARU: Mendapatkan Daftar Merek Dinamis
+def get_quick_brand_list():
+    """Mengambil 6 merek teratas dari data aktif untuk Quick Filter."""
+    try:
+        # Ambil semua merek dari data aktif
+        res = supabase.table("stock_opname").select("brand").eq("is_active", True).execute()
+        df = pd.DataFrame(res.data)
+        
+        if df.empty:
+            return []
+            
+        # Hitung frekuensi merek (Value_counts) dan ambil 6 teratas, ubah ke list
+        top_brands = df['brand'].str.upper().value_counts().nlargest(6).index.tolist()
+        return top_brands
+    except Exception as e:
+        # Fallback jika terjadi error database, gunakan merek umum
+        return ["SAMSUNG", "LG", "ACER"] 
+
 # --- FUNGSI HELPER DATABASE SO ---
 def get_active_session_info():
     try:
@@ -143,7 +161,7 @@ def get_db_updated_at(id_barang):
     except Exception as e:
         return datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(), "SYSTEM_ERROR"
 
-# --- FUNGSI UTAMA LOGIKA SIMPAN & CALLBACK (Sama seperti v4.8) ---
+# --- FUNGSI UTAMA LOGIKA SIMPAN & CALLBACK ---
 def handle_update(row, new_qty, is_sn, nama_user, loaded_time, keterangan=""):
     id_barang = row['id']
     updates_count = 0
@@ -198,7 +216,7 @@ def fast_save_callback(item_id, is_sn, notes_key, widget_key):
     row = row_match.iloc[0]
     
     nama_user = st.session_state.get(SESSION_KEY_CHECKER, "UNKNOWN")
-    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc)) # FIX: use full signature
+    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc))
 
     if is_sn:
         new_check = st.session_state[widget_key]
@@ -362,13 +380,19 @@ def page_sales():
         st.stop()
         
     
-    # [v4.8] QUICK FILTER BUTTONS
-    st.subheader("Filter Cepat (Brand Umum)")
-    cols_quick_filter = st.columns(len(QUICK_BRANDS))
-    for i, brand in enumerate(QUICK_BRANDS):
-        if cols_quick_filter[i].button(brand, key=f"quick_filter_{brand}"):
-            st.session_state[SESSION_KEY_SEARCH] = brand
-            st.rerun()
+    # [v5.0] QUICK FILTER BUTTONS DINAMIS
+    QUICK_BRANDS_DYNAMIC = get_quick_brand_list() # Ambil merek dinamis
+    st.subheader("Filter Cepat (Merek Aktif)")
+    
+    if QUICK_BRANDS_DYNAMIC:
+        # Gunakan list merek dinamis untuk tombol
+        cols_quick_filter = st.columns(len(QUICK_BRANDS_DYNAMIC))
+        for i, brand in enumerate(QUICK_BRANDS_DYNAMIC):
+            if cols_quick_filter[i].button(brand, key=f"quick_filter_{brand}"):
+                st.session_state[SESSION_KEY_SEARCH] = brand
+                st.rerun()
+    else:
+        st.info("Tidak ada data merek aktif di sesi ini untuk filter cepat.")
             
     # [v4.8] Search Input
     search_txt = st.text_input("🔍 Cari (Ketik Brand/Nama)", placeholder="Contoh: Samsung, Robot...", 
@@ -384,7 +408,7 @@ def page_sales():
         st.rerun()
 
     df = get_data(lokasi, jenis, owner_filter, search_term=st.session_state[SESSION_KEY_SEARCH], only_active=True)
-    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc)) # FIX: use full signature
+    loaded_time = st.session_state.get('data_loaded_time', datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc))
     
     if df.empty:
         st.info(f"Tidak ada data barang **{owner_filter}** di {lokasi}-{jenis}.")
@@ -505,7 +529,7 @@ def page_sales():
 
 # --- HALAMAN ADMIN ---
 def page_admin():
-    st.title("🛡️ Admin Dashboard (v4.9)")
+    st.title("🛡️ Admin Dashboard (v5.0)")
     active_session = get_active_session_info()
     
     if active_session == "Belum Ada Sesi Aktif":
@@ -560,7 +584,7 @@ def page_admin():
     with tab2:
         st.markdown("### Upload Susulan (Offline Recovery)")
         st.caption("Jika internet mati, sales pakai Excel ini. Admin upload disini untuk merge.")
-        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v4.9.xlsx")
+        st.download_button("⬇️ Download Template Offline", get_template_excel(), "Template_Offline_v5.0.xlsx")
         
         file_offline = st.file_uploader("Upload File Sales", type="xlsx", key="u2")
         if file_offline and st.button("Merge Data Offline"):
@@ -614,7 +638,7 @@ def page_admin():
 
     with tab4:
         st.header("👥 Manajemen Operator")
-        st.caption("Tambahkan atau nonaktifkan Sales/Checker tanpa mengubah kode. Membutuhkan tabel 'operator_list'.")
+        st.caption("Tambahkan atau nonaktifkan Sales/Checker.")
 
         # --- Sub-section 1: Add Operator ---
         with st.form("add_operator_form"):
@@ -632,7 +656,7 @@ def page_admin():
             operator_df = pd.DataFrame(operator_data)
         except Exception:
             operator_df = pd.DataFrame()
-            st.warning("Tabel 'operator_list' belum ditemukan di database. Harap jalankan script SQL yang disediakan.")
+            st.warning("Tabel 'operator_list' belum ditemukan di database. Harap jalankan script SQL.")
 
         if not operator_df.empty:
             st.dataframe(operator_df[['nama']], use_container_width=True, hide_index=True)
@@ -677,8 +701,8 @@ def page_admin():
 
 # --- MAIN ---
 def main():
-    st.set_page_config(page_title="SO System v4.9", page_icon="📦", layout="wide")
-    st.sidebar.title("SO Apps v4.9")
+    st.set_page_config(page_title="SO System v5.0", page_icon="📦", layout="wide")
+    st.sidebar.title("SO Apps v5.0")
     st.sidebar.success(f"Sesi: {get_active_session_info()}")
     menu = st.sidebar.radio("Navigasi", ["Sales Input", "Admin Panel"])
     if menu == "Sales Input": page_sales()
